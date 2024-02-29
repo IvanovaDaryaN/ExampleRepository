@@ -1,0 +1,743 @@
+package *;
+
+import *;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang.StringUtils;
+import org.apache.http.HttpHeaders;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.util.EntityUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PagedResourcesAssembler;
+import org.springframework.hateoas.PagedResources;
+import org.springframework.hateoas.Resource;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.math.BigDecimal;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import static com.evelopers.kap.commons.Const.Report.EXTENSION_PDF;
+import static com.evelopers.kap.commons.Const.System.SLASH;
+
+/**
+ * @author ivanova on 13.01.2023
+ * #*
+ * #*
+ * #*
+ */
+
+@Service
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+public class RosreestrStatementService {
+
+
+    private final FileExtensionTypeRepository fileExtensionTypeRepository;
+    private final FileRosreestrStatementRepository fileRosreestrStatementRepository;
+    private final RosreestrStatementKadNumRepository rosreestrStatementKadNumRepository;
+    private final RosreestrStatementKadNumTypeRepository rosreestrStatementKadNumTypeRepository;
+    private final RosreestrStatementKonturRepository rosreestrStatementKonturRepository;
+    private final RosreestrStatementKonturStatusRepository rosreestrStatementKonturStatusRepository;
+    private final RosreestrStatementObjectRepository rosreestrStatementObjectRepository;
+    private final RosreestrStatementObjectTypeRepository rosreestrStatementObjectTypeRepository;
+    private final RosreestrStatementOwnershipTypeRepository rosreestrStatementOwnershipTypeRepository;
+    private final RosreestrStatementOwnershipRepository rosreestrStatementOwnershipRepository;
+    private final RosreestrStatementQueueRepository rosreestrStatementQueueRepository;
+    private final RosreestrStatementRepository rosreestrStatementRepository;
+    private final RosreestrStatementRoomRepository rosreestrStatementRoomRepository;
+    private final RosreestrStatementStatusRepository rosreestrStatementStatusRepository;
+    private final RosreestrStatementTypeRepository rosreestrStatementTypeRepository;
+
+    private final CountPagesInFiles countPagesInFiles;
+    private final EnvironmentService environmentService;
+
+    private final CloseableHttpClient httpClient = HttpClientBuilder.create().build();
+    private final CloseableHttpClient httpClientForDownload = HttpClientBuilder.create().build();
+
+    private static final int HTTP_RESPONSE_STATUS_CODE_OK = 200;
+    private static final int HTTP_RESPONSE_STATUS_CODE_MULTIPLE_CHOICES = 300;
+
+    @Value("${rosreestr.statement.kontur.url}")
+    private String konturUrl;
+    @Value("${rosreestr.statement.kontur.file.url}")
+    private String konturFileUrl;
+    @Value("${rosreestr.statement.kontur.apiKey}")
+    private String apiKey;
+    @Value("${rosreestr.statement.kontur.orgid}")
+    private String orgid;
+
+    @Value("${rosreestr.statement.kontur.url.test")
+    private String konturUrlTest;
+    @Value("${rosreestr.statement.kontur.file.url.test")
+    private String konturFileUrlTest;
+    @Value("${rosreestr.statement.kontur.apiKey.test}")
+    private String apiKeyTest;
+    @Value("${rosreestr.statement.kontur.orgid.test}")
+    private String orgidTest;
+
+    @Value("${document.upload.folder}")
+    private String documentsFolder;
+
+    private final PagedResourcesAssembler<RosreestrStatementDto> rosreestrStatementAssembler = new PagedResourcesAssembler<>(null, null);
+    private final AtomicBoolean isRosreestrStatementForming = new AtomicBoolean(false);
+
+    @Transactional(readOnly = true)
+    public List<RosreestrStatementDto> findAllByKadNum(String kadNum) {
+        if (StringUtils.isNotEmpty(kadNum)) {
+            return rosreestrStatementRepository.findAllByKadNum(kadNum.trim());
+        }
+        return new ArrayList<>();
+    }
+
+    public PagedResources<Resource<RosreestrStatementDto>> findAllPageable(RosreestrStatementParams rosreestrStatementParams,
+                                                                           Pageable pageable) {
+        return rosreestrStatementAssembler.toResource(rosreestrStatementRepository.findAllPageable(rosreestrStatementParams, pageable));
+    }
+
+    @Transactional
+    public void createRosreestrStatementList(List<RosreestrStatementDto> rosreestrStatementList) throws IOException {
+        for (RosreestrStatementDto rosreestrStatementDto : rosreestrStatementList) {
+            createRosreestrStatement(rosreestrStatementDto);
+        }
+    }
+
+    public ResponseEntity<String> refreshStatement(Long id) throws IOException {
+        RosreestrStatementQueue rosreestrStatementQueue = rosreestrStatementQueueRepository.findOneByRosreestrStatementId(id);
+        if (rosreestrStatementQueue == null) {
+            rosreestrStatementQueue = new RosreestrStatementQueue();
+            rosreestrStatementQueue.setRosreestrStatement(rosreestrStatementRepository.findOne(id));
+            rosreestrStatementQueueRepository.save(rosreestrStatementQueue);
+        }
+        saveOrUpdateDocflow(rosreestrStatementRepository.findOne(id));
+        return ResponseEntity.status(HttpStatus.OK).build();
+    }
+
+    @Scheduled(cron = "0 0 8,11,13,15,17 * * *")
+    public void refreshStatementAllExcludeManually() throws IOException {
+        refreshStatementAll(false);
+    }
+
+    @Scheduled(cron = "0 0 0-6,22-23 * * *")
+    public void refreshStatementAll() throws IOException {
+        refreshStatementAll(true);
+    }
+
+    public void refreshStatementAll(boolean full) throws IOException {
+        List<RosreestrStatementQueue> rosreestrStatementQueueList = full ?
+                rosreestrStatementQueueRepository.findAll() : rosreestrStatementQueueRepository.findAllByRosreestrStatementManuallyFalse();
+        rosreestrStatementQueueList.sort(Comparator.comparing(RosreestrStatementQueue::getId));
+        for (RosreestrStatementQueue rosreestrStatementQueue : rosreestrStatementQueueList) {
+            saveOrUpdateDocflow(rosreestrStatementQueue.getRosreestrStatement());
+        }
+    }
+
+    @Transactional
+    public synchronized void saveOrUpdateDocflow(RosreestrStatement rosreestrStatement) throws IOException {
+        if (isRosreestrStatementForming.compareAndSet(false, true)) {
+
+            String konturResponseCode = "Error";
+            HttpResponse httpResponse = null;
+
+            RosreestrStatementKontur rosreestrStatementKontur = rosreestrStatement.getRosreestrStatementKontur();
+            try {
+                ObjectMapper objectMapper = new ObjectMapper();
+                objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+                String docflowId = rosreestrStatementKontur.getDocflowId();
+                KonturRequest konturRequest = formRequest(rosreestrStatement);
+                if (docflowId == null) {
+                    HttpPost request = new HttpPost(konturUrl + "docflows");
+                    request.setHeader(HttpHeaders.AUTHORIZATION, "ReestroAuth " + "apiKey=" + apiKey + "&portal.orgid=" + orgid);
+                    request.setHeader(HttpHeaders.CONTENT_TYPE, "application/json");
+                    request.setEntity(new StringEntity(objectMapper.writeValueAsString(konturRequest)));
+                    httpResponse = httpClient.execute(request);
+
+                } else {
+                    HttpGet request = new HttpGet(konturUrl + "docflows/" + docflowId);
+                    request.setHeader(HttpHeaders.AUTHORIZATION, "ReestroAuth " + "apiKey=" + apiKey + "&portal.orgid=" + orgid);
+                    request.setHeader(HttpHeaders.CONTENT_TYPE, "application/json");
+                    httpResponse = httpClient.execute(request);
+                }
+
+                String json = IOUtils.toString(httpResponse.getEntity().getContent(), StandardCharsets.UTF_8);
+                rosreestrStatementKontur.setKonturJson(json);
+
+                int responseCode = httpResponse.getStatusLine().getStatusCode();
+                if (responseCode < HTTP_RESPONSE_STATUS_CODE_OK || responseCode >= HTTP_RESPONSE_STATUS_CODE_MULTIPLE_CHOICES) {
+                    KonturErrorResponse konturErrorResponse = objectMapper.readValue(json, KonturErrorResponse.class);
+                    List<KonturErrorResponse.RosreestrError> errors = konturErrorResponse.getErrors();
+
+                    if (errors != null && !errors.isEmpty() && StringUtils.isNotEmpty(errors.get(0).getCode()))
+                        konturResponseCode = konturErrorResponse.getErrors().get(0).getCode();
+
+                    saveOrUpdate(rosreestrStatement, null, konturResponseCode);
+                } else {
+                    KonturResponse konturResponse = objectMapper.readValue(json, KonturResponse.class);
+                    saveOrUpdate(rosreestrStatement, konturResponse, konturResponseCode);
+                }
+            } catch (Exception e) {
+                saveOrUpdate(rosreestrStatement, null, "Error");
+            } finally {
+                if (httpResponse != null) EntityUtils.consume(httpResponse.getEntity());
+                isRosreestrStatementForming.set(false);
+            }
+        }
+    }
+
+    public ResponseEntity<String> isRosreestrStatementForming() {
+        if (isRosreestrStatementForming.get()) {
+            return ResponseEntity.status(org.springframework.http.HttpStatus.CONFLICT).build();
+        } else {
+            return ResponseEntity.status(HttpStatus.OK).build();
+        }
+    }
+
+    public List<RosreestrStatementStatus> findAllRosreestrStatementStatus() {
+        return rosreestrStatementStatusRepository.findAll();
+    }
+
+    public List<RosreestrStatementType> findAllRosreestrStatementType() {
+        return rosreestrStatementTypeRepository.findAll();
+    }
+
+    public List<RosreestrStatementObjectType> findAllRosreestrStatementObjectType() {
+        return rosreestrStatementObjectTypeRepository.findAll();
+    }
+
+    private void createRosreestrStatement(RosreestrStatementDto statement) throws IOException {
+//        if (!environmentService.isProdConnection()) {
+//            konturUrl = konturUrlTest;
+//            konturFileUrl = konturFileUrlTest;
+//            apiKey = apiKeyTest;
+//            orgid = orgidTest;
+//        }
+
+        RosreestrStatement rosreestrStatement = new RosreestrStatement();
+
+        rosreestrStatement.setKadNum(statement.getKadNum());
+        rosreestrStatement.setRequestDate(new Date());
+        rosreestrStatement.setRosreestrStatementType(statement.getRosreestrStatementType());
+        rosreestrStatement.setUser(SecurityUtils.getLoggedinUser());
+        rosreestrStatement.setRosreestrStatementStatus(rosreestrStatementStatusRepository.findByCode("NEW"));
+        rosreestrStatement = rosreestrStatementRepository.save(rosreestrStatement);
+
+        RosreestrStatementQueue rosreestrStatementQueue = new RosreestrStatementQueue();
+        rosreestrStatementQueue.setRosreestrStatement(rosreestrStatement);
+        rosreestrStatementQueueRepository.save(rosreestrStatementQueue);
+
+        RosreestrStatementKontur rosreestrStatementKontur = new RosreestrStatementKontur();
+        rosreestrStatementKontur.setRosreestrStatement(rosreestrStatement);
+        rosreestrStatementKontur.setRosreestrStatementKonturStatus(rosreestrStatementKonturStatusRepository.findByCode("Sending"));
+        rosreestrStatementKonturRepository.save(rosreestrStatementKontur);
+
+        rosreestrStatement.setRosreestrStatementKontur(rosreestrStatementKontur);
+        rosreestrStatementRepository.save(rosreestrStatement);
+
+        if (!isRosreestrStatementForming.get()) saveOrUpdateDocflow(rosreestrStatement);
+    }
+
+    private void saveOrUpdate(RosreestrStatement rosreestrStatement, KonturResponse konturResponse, String konturResponseCode) throws IOException {
+        RosreestrStatementStatus errorRosreestrStatementStatus = rosreestrStatementStatusRepository.findByCode("ERROR");
+
+        RosreestrStatementQueue rosreestrStatementQueue = rosreestrStatementQueueRepository.findOneByRosreestrStatementId(rosreestrStatement.getId());
+        RosreestrStatementKontur rosreestrStatementKontur = rosreestrStatement.getRosreestrStatementKontur();
+
+        if (konturResponse != null) {
+            konturResponseCode = konturResponse.getDocflowState();
+            rosreestrStatementKontur.setDocflowId(konturResponse.getDocflowId());
+            KonturResponse.ObjectExtract objectExtract = konturResponse.getObjectExtract();
+            if (rosreestrStatementKontur.getAddressKontur() == null && objectExtract != null && StringUtils.isNotEmpty(objectExtract.getObjects().get(0).getAddress()))
+                rosreestrStatementKontur.setAddressKontur(objectExtract.getObjects().get(0).getAddress());
+        }
+
+        RosreestrStatementKonturStatus konturStatus = rosreestrStatementKonturStatusRepository.findByCode(konturResponseCode);
+        RosreestrStatementStatus rosreestrStatementStatus = konturStatus != null ? konturStatus.getRosreestrStatementStatus() : null;
+
+        if (konturResponse != null && konturStatus != null) {
+            rosreestrStatementKontur.setRosreestrStatementKonturStatus(konturStatus);
+
+            switch (rosreestrStatementStatus.getCode()) {
+                case "NEW":
+                case "SEND":
+                    rosreestrStatement.setRosreestrStatementStatus(rosreestrStatementStatus);
+                    break;
+
+                case "CANCELED":
+                case "ERROR":
+                    rosreestrStatement.setRosreestrStatementStatus(rosreestrStatementStatus);
+                    rosreestrStatement.setReceiveDate(new Date());
+                    deleteQueue(rosreestrStatementQueue);
+                    break;
+
+                case "PROCESSED":
+                    rosreestrStatement.setReceiveDate(new Date());
+                    rosreestrStatement.setRosreestrStatementStatus(errorRosreestrStatementStatus);
+
+                    List<KonturResponse.RosreestrResponse> rosreestrResponses = konturResponse.getRosreestrResponses();
+                    if (rosreestrResponses != null && !rosreestrResponses.isEmpty()) {
+
+                        for (KonturResponse.RosreestrResponse rosreestrResponse : rosreestrResponses) {
+                            KonturResponse.RosreestrResponse.Outdoc outdoc = rosreestrResponse.getOutdoc();
+                            if (outdoc != null) {
+                                KonturResponse.RosreestrResponse.Outdoc.ContentInfo content = outdoc.getContent();
+
+                                if (content != null && StringUtils.isNotEmpty(content.getContentId())) {
+                                    boolean isFileDownloaded = downloadFile(rosreestrStatement, content.getContentId());
+
+                                    if (isFileDownloaded || isObjectTypeBuilding(outdoc)) {
+                                        saveMetaAndData(outdoc, rosreestrStatement);
+                                        rosreestrStatement.setRosreestrStatementStatus(rosreestrStatementStatus);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    deleteQueue(rosreestrStatementQueue);
+                    break;
+
+                default:
+                    rosreestrStatement.setRosreestrStatementStatus(errorRosreestrStatementStatus);
+                    rosreestrStatement.setReceiveDate(new Date());
+                    deleteQueue(rosreestrStatementQueue);
+                    break;
+            }
+        } else {
+            RosreestrStatementKonturStatus rosreestrStatementKonturStatus = konturStatus;
+            if (rosreestrStatementKonturStatus == null) {
+                rosreestrStatementKonturStatus.setCode(konturResponseCode);
+                rosreestrStatementKonturStatus.setRosreestrStatementStatus(errorRosreestrStatementStatus);
+                rosreestrStatementKonturStatus = rosreestrStatementKonturStatusRepository.save(rosreestrStatementKonturStatus);
+            }
+            rosreestrStatementKontur.setRosreestrStatementKonturStatus(rosreestrStatementKonturStatus);
+            rosreestrStatement.setRosreestrStatementStatus(errorRosreestrStatementStatus);
+            rosreestrStatement.setReceiveDate(new Date());
+
+            deleteQueue(rosreestrStatementQueue);
+            FileUtils.deleteDirectory(Paths.get(documentsFolder, "rosreestrStatement" + SLASH + rosreestrStatement.getId() + SLASH + rosreestrStatement.getKadNum().replace(":", "_") + ".pdf").getParent().toFile());
+
+            deleteRosreestrStatementData(rosreestrStatement.getId());
+        }
+        rosreestrStatement.setRosreestrStatementKontur(rosreestrStatementKontur);
+        rosreestrStatementRepository.save(rosreestrStatement);
+    }
+
+    private KonturRequest formRequest(RosreestrStatement rosreestrStatement) {
+        KonturResponse.ObjectExtract objectExtract = new KonturResponse.ObjectExtract();
+
+        KonturResponse.ObjectExtract.Object object = new KonturResponse.ObjectExtract.Object();
+        object.setCadastralNumber(rosreestrStatement.getKadNum());
+
+        List<KonturResponse.ObjectExtract.Object> objects = new ArrayList<>();
+        objects.add(object);
+
+        objectExtract.setObjects(objects);
+        objectExtract.setExtractType(rosreestrStatement.getRosreestrStatementType().getKonturCode());
+
+        KonturRequest konturRequest = new KonturRequest();
+        konturRequest.setExternalId(String.valueOf(rosreestrStatement.getId()));
+        konturRequest.setObjectExtract(objectExtract);
+
+        return konturRequest;
+    }
+
+    private void deleteQueue(RosreestrStatementQueue rosreestrStatementQueue) {
+        rosreestrStatementQueueRepository.delete(rosreestrStatementQueue);
+    }
+
+    private boolean downloadFile(RosreestrStatement rosreestrStatement, String contentId) throws IOException {
+        HttpResponse httpResponse = null;
+
+        try {
+            HttpGet request = new HttpGet(konturFileUrl + "contents/" + contentId);
+            request.setHeader(HttpHeaders.AUTHORIZATION, "ReestroAuth " + "apiKey=" + apiKey + "&portal.orgid=" + orgid);
+            request.setHeader(HttpHeaders.CONTENT_TYPE, "application/json");
+            httpResponse = httpClientForDownload.execute(request);
+
+            InputStream inputStream;
+            int konturStatusCode = httpResponse.getStatusLine().getStatusCode();
+            if (konturStatusCode < HTTP_RESPONSE_STATUS_CODE_OK || konturStatusCode >= HTTP_RESPONSE_STATUS_CODE_MULTIPLE_CHOICES)
+                return false;
+            else inputStream = httpResponse.getEntity().getContent();
+            if (inputStream == null) return false;
+
+            if (!saveFile(inputStream, rosreestrStatement)) return false;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+
+        } finally {
+            if (httpResponse != null) {
+                try {
+                    EntityUtils.consume(httpResponse.getEntity());
+                } catch (Exception e) { // throw http.ConnectionClosedException because of KonturReestro in case then pdf file is too large
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean saveFile(InputStream inputStream, RosreestrStatement rosreestrStatement) throws IOException {
+        Long rosreestrStatementId = rosreestrStatement.getId();
+        String kadNum = rosreestrStatement.getKadNum().replace(":", "_");
+
+        String pathFolder = "rosreestrStatement" + SLASH + rosreestrStatementId;
+        String pathFile = pathFolder + SLASH + kadNum + ".pdf";
+        Path path = Paths.get(documentsFolder, pathFile);
+        Path directoryPath = path.getParent();
+        Files.createDirectories(directoryPath);
+
+        try (ZipInputStream zipInputStream = new ZipInputStream(inputStream, Charset.forName("windows-1251"));
+             FileOutputStream outputStream = new FileOutputStream(new File(path.toUri()), false)) {
+            int countFiles = 0;
+            ZipEntry entry;
+
+            while ((entry = zipInputStream.getNextEntry()) != null) {
+                if (entry.getSize() != 0 && entry.getName().endsWith(EXTENSION_PDF)) {
+                    ++countFiles;
+                    int read;
+                    byte[] bytes = new byte[8096];
+                    while ((read = zipInputStream.read(bytes)) != -1) {
+                        outputStream.write(bytes, 0, read);
+                    }
+                }
+                zipInputStream.closeEntry();
+            }
+
+            if (countFiles != 1) {
+                FileUtils.deleteDirectory(directoryPath.toFile());
+                return false;
+            }
+
+            FileRosreestrStatement fileRosreestrStatement = fileRosreestrStatementRepository.findByPathFile(pathFile);
+            if (fileRosreestrStatement == null) {
+                fileRosreestrStatement = new FileRosreestrStatement();
+                fileRosreestrStatement.setPathFile(pathFile);
+                fileRosreestrStatement.setNameFile(path.toFile().getName());
+                fileRosreestrStatement.setPathFolder(pathFolder);
+                fileRosreestrStatement.setFileExtensionType(fileExtensionTypeRepository.findByNameIgnoreCase("pdf"));
+                fileRosreestrStatement.setCountPages(countPagesInFiles.countPagesDocument(fileRosreestrStatement.getFileExtensionType().getName(), path));
+                fileRosreestrStatement.setObjectId(rosreestrStatementId);
+                fileRosreestrStatementRepository.save(fileRosreestrStatement);
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            FileUtils.deleteDirectory(directoryPath.toFile());
+            return false;
+        }
+        return true;
+    }
+
+    private void saveMetaAndData(KonturResponse.RosreestrResponse.Outdoc outdoc, RosreestrStatement rosreestrStatement) {
+        List<KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed> extracts = outdoc.getExtracts();
+
+        if (extracts != null && !extracts.isEmpty()) {
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed objectExtractParsed = extracts.get(0); // Подтвеждено письмом Контура от 22.05.2023
+
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractMeta extractMeta = objectExtractParsed.getMeta();
+            if (extractMeta != null) {
+                if (extractMeta.getDate() != null) rosreestrStatement.setStatementDate(extractMeta.getDate());
+                if (StringUtils.isNotEmpty(extractMeta.getNumber()))
+                    rosreestrStatement.setStatementNumber(extractMeta.getNumber());
+            }
+
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData extractData = objectExtractParsed.getData();
+            if (extractData != null && extractData.getObjectInfo() != null) {
+                saveObjectInfo(rosreestrStatement, extractData.getObjectInfo());
+
+                if (StringUtils.isNotEmpty(extractData.getObjectInfo().getEstateType()) && extractData.getObjectInfo().getEstateType().equals("Building"))
+                    saveRoomInfo(rosreestrStatement, extractData);
+                else
+                    saveOwners(rosreestrStatement, extractData);
+            }
+        }
+    }
+
+    private void saveObjectInfo(RosreestrStatement rosreestrStatement, KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo objectInfo) {
+        RosreestrStatementObject rosreestrStatementObject = new RosreestrStatementObject();
+
+        if (objectInfo.getStartDate() != null)
+            rosreestrStatementObject.setKadStartDate(objectInfo.getStartDate());
+
+        if (objectInfo.getObjectAddress() != null) {
+            if (StringUtils.isNotEmpty(objectInfo.getObjectAddress().getNote()))
+                rosreestrStatementObject.setObjectAddress(objectInfo.getObjectAddress().getNote());
+
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo.ExtractAddress.ExtractAddressElement apartment = objectInfo.getObjectAddress().getApartment();
+            if (apartment != null) {
+                if (StringUtils.isNotEmpty(apartment.getName()))
+                    rosreestrStatementObject.setRoomNum(apartment.getName());
+                if (StringUtils.isNotEmpty(apartment.getAbbreviation()))
+                    rosreestrStatementObject.setObjectNameShort(apartment.getAbbreviation());
+            }
+        }
+
+        KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo.Measurement area = objectInfo.getArea();
+        if (area != null && StringUtils.isNotEmpty(area.getValue())) {
+            try {
+                rosreestrStatementObject.setSqrFull(new BigDecimal(area.getValue()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        if (StringUtils.isNotEmpty(objectInfo.getName())) rosreestrStatementObject.setObjectName(objectInfo.getName()); // Квартира, многоквартирный дом
+
+        KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo.Measurement cost = objectInfo.getCost();
+        if (cost != null && StringUtils.isNotEmpty(cost.getValue())) {
+            try {
+                rosreestrStatementObject.setKadCost(new BigDecimal(cost.getValue()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        if (objectInfo.getPurpose() != null && StringUtils.isNotEmpty(objectInfo.getPurpose().getDescription()))
+            rosreestrStatementObject.setPurpose(objectInfo.getPurpose().getDescription());
+
+        if (StringUtils.isNotEmpty(objectInfo.getStateDescription()))
+            rosreestrStatementObject.setObjectState(objectInfo.getStateDescription());
+
+        if (StringUtils.isNotEmpty(objectInfo.getSpecialNotes())) {
+            int limit = 1024;
+            String specialNotes = objectInfo.getSpecialNotes().length() > limit ? objectInfo.getSpecialNotes().substring(0, limit) : objectInfo.getSpecialNotes();
+            rosreestrStatementObject.setSpecialNotes(specialNotes);
+        }
+
+        if (objectInfo.getCommonProperty() != null)
+            rosreestrStatementObject.setCommonProperty(objectInfo.getCommonProperty());
+
+        String objectType = objectInfo.getEstateType();
+        if (StringUtils.isNotEmpty(objectType)) {
+            RosreestrStatementObjectType rosreestrStatementObjectType = rosreestrStatementObjectTypeRepository.findByKonturCode(objectType);
+            if (rosreestrStatementObjectType == null) {
+                rosreestrStatementObjectType = new RosreestrStatementObjectType();
+                rosreestrStatementObjectType.setName(objectType);
+                rosreestrStatementObjectType.setKonturCode(objectType);
+                rosreestrStatementObjectType.setCode(objectType.toUpperCase());
+                rosreestrStatementObjectTypeRepository.save(rosreestrStatementObjectType);
+            }
+            rosreestrStatementObject.setObjectType(rosreestrStatementObjectType);
+        }
+        rosreestrStatementObject.setRosreestrStatement(rosreestrStatement);
+        rosreestrStatement.setRosreestrStatementObject(rosreestrStatementObject);
+
+        rosreestrStatementObjectRepository.save(rosreestrStatementObject);
+
+        if (rosreestrStatementObject.getObjectType() != null && rosreestrStatementObject.getObjectType().getCode().equals("FLAT") && objectInfo.getCadLinks() != null) // only for flat
+            saveKadNumInfo(rosreestrStatement, objectInfo.getCadLinks());
+    }
+
+    private void saveOwners(RosreestrStatement rosreestrStatement, KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData data) {
+
+        for (KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.OwnerRight ownerRight : data.getOwnersRights()) {
+
+            RosreestrStatementOwnership rosreestrStatementOwnership = new RosreestrStatementOwnership();
+
+            if (StringUtils.isNotEmpty(ownerRight.getRegNumber()))
+                rosreestrStatementOwnership.setRegNumber(ownerRight.getRegNumber());
+
+            if (ownerRight.getStartDate() != null)
+                rosreestrStatementOwnership.setStartDate(ownerRight.getStartDate());
+            if (ownerRight.getEndDate() != null)
+                rosreestrStatementOwnership.setEndDate(ownerRight.getEndDate());
+
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.OwnerRight.Share share = ownerRight.getShare();
+            if (share != null) {
+                if (StringUtils.isNotEmpty(share.getNumerator()))
+                    rosreestrStatementOwnership.setNumPortion(share.getNumerator());
+                if (StringUtils.isNotEmpty(share.getDenominator()))
+                    rosreestrStatementOwnership.setDenPortion(share.getDenominator());
+            }
+
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.OwnerRight.RightChanges changes = ownerRight.getChanges();
+            if (changes != null) {
+                if (StringUtils.isNotEmpty(changes.getChangeRecordNumber()))
+                    rosreestrStatementOwnership.setChangeRegNumber(changes.getChangeRecordNumber());
+                if (changes.getFixedAt() != null) rosreestrStatementOwnership.setChangeDate(changes.getFixedAt());
+            }
+
+            String ownershipType = ownerRight.getOwnershipType();
+            if (StringUtils.isNotEmpty(ownershipType)) {
+                RosreestrStatementOwnershipType rosreestrStatementOwnershipType = rosreestrStatementOwnershipTypeRepository.findByKonturCode(ownershipType);
+                if (rosreestrStatementOwnershipType == null) {
+                    rosreestrStatementOwnershipType = new RosreestrStatementOwnershipType();
+                    rosreestrStatementOwnershipType.setName(ownershipType);
+                    rosreestrStatementOwnershipType.setKonturCode(ownershipType);
+                    rosreestrStatementOwnershipType.setCode(ownershipType.toUpperCase());
+                    rosreestrStatementOwnershipTypeRepository.save(rosreestrStatementOwnershipType);
+                }
+                rosreestrStatementOwnership.setRosreestrStatementOwnershipType(rosreestrStatementOwnershipType);
+            }
+
+            List<RosreestrStatementOwner> rosreestrStatementOwnerList = new ArrayList<>();
+            for (KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.OwnerRight.Owner owner : ownerRight.getOwners()) {
+
+                RosreestrStatementOwner rosreestrStatementOwner = new RosreestrStatementOwner();
+                KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.OwnerRight.Owner.PersonInfo person = owner.getPerson();
+                if (person != null) {
+                    if (StringUtils.isNotEmpty(person.getName()))
+                        rosreestrStatementOwner.setFirstName(person.getName());
+                    if (StringUtils.isNotEmpty(person.getLastName()))
+                        rosreestrStatementOwner.setLastName(person.getLastName());
+                    if (StringUtils.isNotEmpty(person.getPatronomyc()))
+                        rosreestrStatementOwner.setMiddleName(person.getPatronomyc());
+                }
+
+                KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.OwnerRight.Owner.Organization organization = owner.getOrganization();
+                if (organization != null) {
+                    if (StringUtils.isNotEmpty(organization.getName()))
+                        rosreestrStatementOwner.setOrganizationName(organization.getName());
+                    if (StringUtils.isNotEmpty(organization.getInn()))
+                        rosreestrStatementOwner.setInn(organization.getInn());
+                    if (StringUtils.isNotEmpty(organization.getOgrn()))
+                        rosreestrStatementOwner.setOgrn(organization.getOgrn());
+                }
+
+                if (owner.getGovernance() != null && StringUtils.isNotEmpty(owner.getGovernance().getName()))
+                    rosreestrStatementOwner.setGovernanceName(owner.getGovernance().getName());
+
+                if (owner.getAnotherRight() != null && StringUtils.isNotEmpty(owner.getAnotherRight().getName()))
+                    rosreestrStatementOwner.setAnotherRightName(owner.getAnotherRight().getName());
+
+                if (owner.getUndefined() != null && StringUtils.isNotEmpty(owner.getUndefined().getName()))
+                    rosreestrStatementOwner.setUndefinedName(owner.getUndefined().getName());
+
+                rosreestrStatementOwner.setRosreestrStatementOwnership(rosreestrStatementOwnership);
+                rosreestrStatementOwnerList.add(rosreestrStatementOwner);
+            }
+            rosreestrStatementOwnership.setRosreestrStatementOwnerList(rosreestrStatementOwnerList);
+            rosreestrStatementOwnership.setRosreestrStatement(rosreestrStatement);
+
+            rosreestrStatementOwnershipRepository.save(rosreestrStatementOwnership);
+        }
+    }
+
+    private void saveKadNumInfo(RosreestrStatement rosreestrStatement, KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo.KadNumInfo
+            cadNumInfo) {
+        if (CollectionUtils.isNotEmpty(cadNumInfo.getLandCadNumbers())) {
+            RosreestrStatementKadNumType kadNumTypeLand = rosreestrStatementKadNumTypeRepository.findByCode("LAND");
+            for (String landCadNumber : cadNumInfo.getLandCadNumbers()) {
+                RosreestrStatementKadNum rosreestrStatementKadNum = new RosreestrStatementKadNum();
+                rosreestrStatementKadNum.setKadNum(landCadNumber);
+                rosreestrStatementKadNum.setKadNumType(kadNumTypeLand);
+                rosreestrStatementKadNum.setRosreestrStatement(rosreestrStatement);
+                rosreestrStatementKadNumRepository.save(rosreestrStatementKadNum);
+            }
+        }
+
+        if (CollectionUtils.isNotEmpty(cadNumInfo.getAscendantCadNumbers())) {
+            RosreestrStatementKadNumType kadNumTypeAscendant = rosreestrStatementKadNumTypeRepository.findByCode("ASCENDANT");
+            for (String ascendantCadNumber : cadNumInfo.getAscendantCadNumbers()) {
+                RosreestrStatementKadNum rosreestrStatementKadNum = new RosreestrStatementKadNum();
+                rosreestrStatementKadNum.setKadNum(ascendantCadNumber);
+                rosreestrStatementKadNum.setKadNumType(kadNumTypeAscendant);
+                rosreestrStatementKadNum.setRosreestrStatement(rosreestrStatement);
+                rosreestrStatementKadNumRepository.save(rosreestrStatementKadNum);
+            }
+        }
+
+        if (CollectionUtils.isNotEmpty(cadNumInfo.getDescendantCadNumbers())) {
+            RosreestrStatementKadNumType kadNumTypeDescendant = rosreestrStatementKadNumTypeRepository.findByCode("DESCENDANT");
+            for (String descendantCadNumber : cadNumInfo.getDescendantCadNumbers()) {
+                RosreestrStatementKadNum rosreestrStatementKadNum = new RosreestrStatementKadNum();
+                rosreestrStatementKadNum.setKadNum(descendantCadNumber);
+                rosreestrStatementKadNum.setKadNumType(kadNumTypeDescendant);
+                rosreestrStatementKadNum.setRosreestrStatement(rosreestrStatement);
+                rosreestrStatementKadNumRepository.save(rosreestrStatementKadNum);
+            }
+        }
+    }
+
+    private void saveRoomInfo(RosreestrStatement rosreestrStatement, KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData objectExtractData) {
+
+        KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.EstateExtractDetails.BuildInfo building =
+                objectExtractData.getDetails() != null ? objectExtractData.getDetails().getBuilding() : null;
+        List<KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.EstateExtractDetails.BuildInfo.RoomRecord> roomRecords =
+                building.getRoomRecords() != null ? building.getRoomRecords() : new ArrayList<>();
+
+        for (KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.EstateExtractDetails.BuildInfo.RoomRecord room : roomRecords) {
+
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo objectInfo = room.getObjectInfo();
+            if (objectInfo != null) {
+                RosreestrStatementRoom rosreestrStatementRoom = new RosreestrStatementRoom();
+                if (StringUtils.isNotEmpty(objectInfo.getCadastralNumber()))
+                    rosreestrStatementRoom.setKadNum(objectInfo.getCadastralNumber());
+
+                KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo.ExtractAddress objectAddress = objectInfo.getObjectAddress();
+                if (objectAddress != null && objectAddress.getApartment() != null && objectAddress.getApartment().getName() != null)
+                    rosreestrStatementRoom.setRoomNum(objectAddress.getApartment().getName());
+
+                if (objectInfo.getPurpose() != null && StringUtils.isNotEmpty(objectInfo.getPurpose().getDescription()))
+                    rosreestrStatementRoom.setPurpose(objectInfo.getPurpose().getDescription());
+
+                KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData.ObjectInfo.Measurement area = objectInfo.getArea();
+                if (area != null && StringUtils.isNotEmpty(area.getValue())) {
+                    try {
+                        rosreestrStatementRoom.setSqrFull(new BigDecimal(area.getValue()));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+
+                if (objectInfo.getCommonProperty() != null)
+                    rosreestrStatementRoom.setCommonProperty(objectInfo.getCommonProperty());
+
+                rosreestrStatementRoom.setRosreestrStatement(rosreestrStatement);
+                rosreestrStatementRoomRepository.save(rosreestrStatementRoom);
+
+            }
+        }
+    }
+
+    private boolean isObjectTypeBuilding(KonturResponse.RosreestrResponse.Outdoc outdoc) {
+        List<KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed> extracts = outdoc.getExtracts();
+        if (CollectionUtils.isNotEmpty(extracts)) {
+            KonturResponse.RosreestrResponse.Outdoc.ObjectExtractParsed.ObjectExtractData extractData = extracts.get(0).getData();
+            if (extractData != null) {
+                if (extractData.getObjectInfo() != null && StringUtils.isNotEmpty(extractData.getObjectInfo().getEstateType()))
+                    return extractData.getObjectInfo().getEstateType().equals("Building");
+            }
+            return false;
+        }
+        return false;
+    }
+
+    private void deleteRosreestrStatementData(Long rosreestrStatementId) {
+        fileRosreestrStatementRepository.deleteByObjectId(rosreestrStatementId);
+        rosreestrStatementObjectRepository.deleteByRosreestrStatementId(rosreestrStatementId);
+        rosreestrStatementOwnershipRepository.deleteByRosreestrStatementId(rosreestrStatementId);
+        rosreestrStatementKadNumRepository.deleteByRosreestrStatementId(rosreestrStatementId);
+        rosreestrStatementRoomRepository.deleteByRosreestrStatementId(rosreestrStatementId);
+    }
+
+}
