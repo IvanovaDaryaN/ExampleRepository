@@ -1,0 +1,181 @@
+package *;
+
+import *;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
+
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.TypedQuery;
+import javax.persistence.criteria.*;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * @author ivanova on 20.02.2023
+ * #*
+ */
+
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+public class RosreestrStatementRepositoryImpl implements RosreestrStatementRepositoryCustom {
+
+    @PersistenceContext
+    private EntityManager em;
+
+    @Override
+    public List<RosreestrStatementDto> findAllByKadNum(String kadNum) {
+        CriteriaBuilder criteriaBuilder = em.getCriteriaBuilder();
+        CriteriaQuery<RosreestrStatementDto> query = criteriaBuilder.createQuery(RosreestrStatementDto.class);
+        Root<RosreestrStatement> root = query.from(RosreestrStatement.class);
+
+        Subquery<FileRosreestrStatement> fileRosreestrStatementSubquery = getRosreestrStatementFileSubquery(criteriaBuilder, query, root);
+        Selection<RosreestrStatementDto> selection = criteriaBuilder.construct(RosreestrStatementDto.class,
+                root.get("id"),
+                root.get("kadNum"),
+                root.get("requestDate"),
+                root.get("receiveDate"),
+                root.get("rosreestrStatementType"),
+                root.get("user"),
+                root.get("rosreestrStatementStatus"),
+                fileRosreestrStatementSubquery.getSelection());
+
+        Predicate kadNumPredicate = criteriaBuilder.equal(root.get("kadNum"), kadNum);
+        Order[] receiveDateOrder = new Order[]{criteriaBuilder.desc(root.get("receiveDate"))};
+        return em.createQuery(query.select(selection).where(kadNumPredicate).orderBy(receiveDateOrder)).getResultList();
+    }
+
+    @Override
+    public Page<RosreestrStatementDto> findAllPageable(RosreestrStatementParams params, Pageable pageable) {
+
+        CriteriaBuilder criteriaBuilder = em.getCriteriaBuilder();
+        CriteriaQuery<RosreestrStatementDto> query = criteriaBuilder.createQuery(RosreestrStatementDto.class);
+        Root<RosreestrStatement> root = query.from(RosreestrStatement.class);
+
+        Join<RosreestrStatement, RosreestrStatementObject> objectJoin = root.join("rosreestrStatementObject", JoinType.LEFT);
+        Join<RosreestrStatementObject, RosreestrStatementObjectType> objectTypeJoin = objectJoin.join("objectType", JoinType.LEFT);
+
+        Subquery<FileRosreestrStatement> fileRosreestrStatementSubquery = getRosreestrStatementFileSubquery(criteriaBuilder, query, root);
+        Subquery<Long> flatExistsSubquery = getFlatExistsSubquery(criteriaBuilder, query, root);
+
+        Selection<RosreestrStatementDto> selection = criteriaBuilder.construct(RosreestrStatementDto.class,
+                root.get("id"),
+                root.get("kadNum"),
+                root.get("requestDate"),
+                root.get("receiveDate"),
+                root.get("rosreestrStatementType"),
+                root.get("user"),
+                root.get("rosreestrStatementStatus"),
+                root.get("rosreestrStatementKontur").get("addressKontur"),
+                objectTypeJoin,
+                fileRosreestrStatementSubquery.getSelection(),
+                flatExistsSubquery.getSelection());
+
+        List<Order> orders = new ArrayList<>();
+        if (pageable.getSort() == null) {
+            orders.add(criteriaBuilder.desc(root.get("receiveDate")));
+            orders.add(criteriaBuilder.desc(root.get("requestDate")));
+            orders.add(criteriaBuilder.desc(root.get("id")));
+        } else {
+            orders.addAll(RepositoryUtils.createOrders(criteriaBuilder, root, pageable.getSort()));
+        }
+
+        Predicate[] predicates = getPredicates(criteriaBuilder, root, flatExistsSubquery, objectTypeJoin, params);
+
+        TypedQuery<RosreestrStatementDto> typedQuery = em.createQuery(query.select(selection).where(predicates).orderBy(orders));
+
+        if (pageable != null) {
+            typedQuery = typedQuery.setFirstResult(pageable.getOffset()).setMaxResults(pageable.getPageSize());
+            List<RosreestrStatementDto> resultList = typedQuery.getResultList();
+
+            CriteriaQuery<Long> countQuery = criteriaBuilder.createQuery(Long.class);
+            Root<RosreestrStatement> countRoot = countQuery.from(RosreestrStatement.class);
+
+            Join<RosreestrStatement, RosreestrStatementObject> countObjectJoin = countRoot.join("rosreestrStatementObject", JoinType.LEFT);
+            Join<RosreestrStatementObject, RosreestrStatementObjectType> countObjectTypeJoin = countObjectJoin.join("objectType", JoinType.LEFT);
+
+            Predicate[] countPredicates = getPredicates(criteriaBuilder, countRoot, flatExistsSubquery, countObjectTypeJoin, params);
+            Long count = em.createQuery(countQuery.multiselect(criteriaBuilder.count(countRoot)).where(countPredicates)).getSingleResult();
+
+            return new PageImpl<>(resultList, pageable, count == null ? 0 : count);
+
+        } else {
+            return new PageImpl<>(typedQuery.getResultList());
+        }
+    }
+
+    private Subquery<FileRosreestrStatement> getRosreestrStatementFileSubquery(CriteriaBuilder criteriaBuilder,
+                                                                               CriteriaQuery query,
+                                                                               Root<RosreestrStatement> root) {
+        Subquery<FileRosreestrStatement> sub = query.subquery(FileRosreestrStatement.class);
+        Root<FileRosreestrStatement> subRoot = sub.from(FileRosreestrStatement.class);
+        sub.select(subRoot);
+        List<Predicate> subPredicates = new ArrayList<>();
+        subPredicates.add(criteriaBuilder.equal(root.get("id"), subRoot.get("objectId")));
+        sub.where(subPredicates.toArray(new Predicate[0]));
+        return sub;
+    }
+
+    private Subquery<Long> getFlatExistsSubquery(CriteriaBuilder criteriaBuilder,
+                                                 CriteriaQuery<RosreestrStatementDto> query,
+                                                 Root<RosreestrStatement> root) {
+        Subquery<Long> sub = query.subquery(Long.class);
+        Root<Flat> subRoot = sub.from(Flat.class);
+        sub.select(criteriaBuilder.count(subRoot.get("id")));
+        List<Predicate> subPredicates = new ArrayList<>();
+        subPredicates.add(criteriaBuilder.equal(root.get("kadNum"), subRoot.get("kadNum")));
+        sub.where(subPredicates.toArray(new Predicate[0]));
+        return sub;
+    }
+
+    private Predicate[] getPredicates(CriteriaBuilder criteriaBuilder,
+                                      Root<RosreestrStatement> root,
+                                      Subquery<Long> flatExistsSubquery,
+                                      Join<RosreestrStatementObject, RosreestrStatementObjectType> objectTypeJoin,
+                                      RosreestrStatementParams params) {
+
+        List<Predicate> predicates = new ArrayList<>();
+
+        if (StringUtils.isNotEmpty(params.getKadNum()))
+            predicates.add(criteriaBuilder.like(criteriaBuilder.lower(root.get("kadNum")), "%" + params.getKadNum().toLowerCase() + "%"));
+
+        if (StringUtils.isNotEmpty(params.getAddressRosreestr()))
+            predicates.add(criteriaBuilder.like(criteriaBuilder.lower(root.get("rosreestrStatementKontur").get("addressKontur")),
+                                                                "%" + params.getAddressRosreestr().toLowerCase() + "%"));
+
+        if (CollectionUtils.isNotEmpty(params.getRosreestrStatementObjectTypeId()))
+            predicates.add(objectTypeJoin.get("id").in(params.getRosreestrStatementObjectTypeId()));
+
+        if (params.getUserId() != null)
+            predicates.add(criteriaBuilder.equal(root.get("user").get("id"), params.getUserId()));
+
+        if (params.getRequestDateFrom() != null)
+            predicates.add(criteriaBuilder.greaterThanOrEqualTo(root.<Date>get("requestDate"), params.getRequestDateFrom()));
+
+        if (params.getRequestDateTo() != null)
+            predicates.add(criteriaBuilder.lessThanOrEqualTo(root.get("requestDate"), params.getRequestDateTo()));
+
+        if (params.getReceiveDateFrom() != null)
+            predicates.add(criteriaBuilder.greaterThanOrEqualTo(root.<Date>get("receiveDate"), params.getReceiveDateFrom()));
+
+        if (params.getReceiveDateTo() != null)
+            predicates.add(criteriaBuilder.lessThanOrEqualTo(root.get("receiveDate"), params.getReceiveDateTo()));
+
+        if (params.getRosreestrStatementTypeId() != null)
+            predicates.add(criteriaBuilder.equal(root.<Integer>get("rosreestrStatementType").get("id"), params.getRosreestrStatementTypeId()));
+
+        if (CollectionUtils.isNotEmpty(params.getRosreestrStatementStatusId()))
+            predicates.add(root.get("rosreestrStatementStatus").get("id").in(params.getRosreestrStatementStatusId()));
+
+        if (params.getFlatNotExists() != null && params.getFlatNotExists())
+            predicates.add(criteriaBuilder.equal(flatExistsSubquery, 0L));
+
+        return predicates.toArray(new Predicate[0]);
+    }
+
+}
