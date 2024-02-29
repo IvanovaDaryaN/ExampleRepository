@@ -1,0 +1,89 @@
+package com.evelopers.kap.data.domain.repair.work.entity;
+
+import com.evelopers.kap.account.service.log.LogEntry;
+import com.evelopers.kap.commons.annotation.ColumnRuName;
+import com.evelopers.kap.commons.enums.Sex;
+import com.evelopers.kap.commons.interfaces.LoggableEntity;
+import com.evelopers.kap.data.domain.common.AuditedRecord;
+import com.fasterxml.jackson.annotation.JsonBackReference;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
+import javax.persistence.*;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * @author ivanova on 31.05.2023
+ * *
+ */
+
+@Getter
+@Setter
+@Entity
+@NoArgsConstructor
+@Table(name = "repair_work_osk_restriction")
+public class RepairWorkOskRestriction extends AuditedRecord implements LoggableEntity<RepairWorkOskRestriction> {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "repair_work_osk_restriction_id_seq")
+    @SequenceGenerator(name = "repair_work_osk_restriction_id_seq", sequenceName = "repair_work_osk_restriction_id_seq", allocationSize = 1)
+    @Column(name = "id")
+    private Long id;
+
+    @JsonBackReference
+    @ManyToOne
+    @JoinColumn(name = "repair_work_osk_id", referencedColumnName = "id")
+    private RepairWorkOsk repairWorkOsk;
+
+    @ColumnRuName(name = "дата начала", sex = Sex.FEMALE)
+    @Column(name = "start_date")
+    private Date startDate;
+
+    @ColumnRuName(name = "дата окончания", sex = Sex.FEMALE)
+    @Column(name = "end_date")
+    private Date endDate;
+
+    @ColumnRuName(name = "комментарий")
+    @Column(name = "comment")
+    private String comment;
+
+    @ColumnRuName(name = "СМР приостановлены")
+    @Column(name = "work_stop")
+    private boolean workStop;
+
+    @ManyToOne
+    @JoinColumn(name = "restriction_type_id", referencedColumnName = "restriction_type_id")
+    @ColumnRuName(name = "вид приостановки", sex = Sex.MALE, fieldValue = "name")
+    private RepairWorkOskRestrictionType restrictionType;
+
+    @JsonIgnore
+    @Override
+    public List<LogEntry> getLogMessageList(Long objectId, String parentSource, LoggableEntity.MessageType type, boolean needDeepLog) {
+        ArrayList<LogEntry> logMessageList = new ArrayList<>();
+        logMessageList.add(new LogEntry("repair_work_osk_restriction", null, type, objectId, this.getId(),
+                new LogEntry.LogEntryComment(type.getDescription() + Sex.FEMALE.getValue(), "Приостановка работы", this.getSourceDescription(), parentSource, "[%1$s][%2$s]:[%3$s]")));
+        return logMessageList;
+    }
+
+    @JsonIgnore
+    @Override
+    public String getSourceDescription() {
+        return "[Приостановка] [Акт начала от " + new SimpleDateFormat("dd.MM.yyyy").format(this.getStartDate()) + "]";
+    }
+
+    @JsonIgnore
+    @Override
+    public boolean compareForLog(RepairWorkOskRestriction o) {
+        try {
+            return this.getId().equals(o.getId());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+}
