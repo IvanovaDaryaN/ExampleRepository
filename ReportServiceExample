@@ -1,0 +1,207 @@
+package *;
+
+import com.evelopers.kap.account.io.jasper.JasperReportTemplate;
+import com.evelopers.kap.account.io.jasper.ReportFormat;
+import com.evelopers.kap.account.io.jasper.ReportItem;
+import com.evelopers.kap.account.repository.repair.RepairPlanRepository;
+import com.evelopers.kap.account.repository.repair.RepairTypeRepository;
+import com.evelopers.kap.account.repository.report.so.SoRpdsReportRepository;
+import com.evelopers.kap.commons.ReportUtils;
+import com.evelopers.kap.data.domain.repair.RepairPlan;
+import com.evelopers.kap.data.domain.repair.RepairType;
+import com.evelopers.kap.data.domain.report.so.SoRpdsReport;
+import lombok.RequiredArgsConstructor;
+import net.sf.jasperreports.engine.JRParameter;
+import net.sf.jasperreports.engine.data.JRBeanCollectionDataSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.text.SimpleDateFormat;
+import java.util.*;
+
+
+/**
+ * @author ivanova on 19.07.2022
+ * #*
+ */
+
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+@Service
+public class SoReportService {
+
+    private final RepairPlanRepository repairPlanRepository;
+    private final RepairTypeRepository repairTypeRepository;
+    private final SoRpdsReportRepository rpdsReportRepository;
+
+    @Value("${report.base}/so/rpds/foundation.jasper")
+    private String rpdsFoundationReportTemplate;
+
+    @Value("${report.base}/so/rpds/roofs.jasper")
+    private String rpdsRoofsReportTemplate;
+
+    @Value("${report.base}/so/rpds/facades.jasper")
+    private String rpdsFacadesReportTemplate;
+
+    @Value("${report.base}/so/rpds/heatSupply.jasper")
+    private String rpdsHeatSupplyReportTemplate;
+
+    @Value("${report.base}/so/rpds/coldWater.jasper")
+    private String rpdsColdWaterReportTemplate;
+
+    @Value("${report.base}/so/rpds/drainage.jasper")
+    private String rpdsDrainageReportTemplate;
+
+    @Value("${report.base}/so/rpds/hotWater.jasper")
+    private String rpdsHotWaterReportTemplate;
+
+    @Value("${report.base}/so/rpds/powerSupply.jasper")
+    private String rpdsPowerSupplyReportTemplate;
+
+    @Value("${report.base}/so/rpds/gasSupply.jasper")
+    private String rpdsGasSupplyReportTemplate;
+
+    @Value("${report.base}/so/rpds/basements.jasper")
+    private String rpdsBasementsReportTemplate;
+
+    @Value("${report.base}/so/rpds/fireProtection.jasper")
+    private String rpdsFireProtectionReportTemplate;
+
+    @Value("${report.base}/so/rpds/lifts.jasper")
+    private String rpdsLiftsReportTemplate;
+
+    @Value("${report.base}/so/rpds/emergencyStructures.jasper")
+    private String rpdsEmergencyStructuresReportTemplate;
+
+    @Value("${report.base}/so/rpds/general.jasper")
+    private String rpdsReportTemplate;
+
+    public com.google.common.base.Optional<ReportItem> getRpdsReport(Long repairPlanId, boolean emptyOnly, ReportFormat format) {
+
+        RepairPlan repairPlan = repairPlanRepository.findOne(repairPlanId);
+        String nameKP = repairPlan.getName();
+        String title = "Поля для РПДС по состоянию на " + new SimpleDateFormat("dd.MM.yyyy").format(new Date());
+
+        Integer year = repairPlan.getYear();
+        List<RepairType> repairTypeList = repairTypeRepository.findAll();
+
+        // params
+        HashMap<String, Object> params = new HashMap<>();
+        params.put(JRParameter.IS_IGNORE_PAGINATION, Boolean.TRUE);
+
+        params.put("nameKP", nameKP);
+        params.put("title", title);
+
+        JRBeanCollectionDataSource dataSources;
+        List<SoRpdsReport> soRpdsReport;
+
+        for (RepairType repairType : repairTypeList) {
+            switch (repairType.getCode()) {
+                case "FOUNDATION": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsFoundationReportTemplate", rpdsFoundationReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsFoundationReportDataSource", dataSources);
+                    break;
+                }
+                case "ROOFS": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsRoofsReportTemplate", rpdsRoofsReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsRoofsReportDataSource", dataSources);
+                    break;
+                }
+                case "FACADES": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsFacadesReportTemplate", rpdsFacadesReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsFacadesReportDataSource", dataSources);
+                    break;
+                }
+                case "HEAT_SUPPLY": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsHeatSupplyReportTemplate", rpdsHeatSupplyReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsHeatSupplyReportDataSource", dataSources);
+                    break;
+                }
+                case "COLD_WATER": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsColdWaterReportTemplate", rpdsColdWaterReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsColdWaterReportDataSource", dataSources);
+                    break;
+                }
+                case "DRAINAGE": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsDrainageReportTemplate", rpdsDrainageReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsDrainageReportDataSource", dataSources);
+                    break;
+                }
+                case "HOT_WATER": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsHotWaterReportTemplate", rpdsHotWaterReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsHotWaterReportDataSource", dataSources);
+                    break;
+                }
+                case "POWER_SUPPLY": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsPowerSupplyReportTemplate", rpdsPowerSupplyReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsPowerSupplyReportDataSource", dataSources);
+                    break;
+                }
+                case "GAS_SUPPLY": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsGasSupplyReportTemplate", rpdsGasSupplyReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsGasSupplyReportDataSource", dataSources);
+                    break;
+                }
+                case "BASEMENTS": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsBasementsReportTemplate", rpdsBasementsReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsBasementsReportDataSource", dataSources);
+                    break;
+                }
+                case "FIRE_PROTECTION": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsFireProtectionReportTemplate", rpdsFireProtectionReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsFireProtectionReportDataSource", dataSources);
+                    break;
+                }
+                case "LIFTS": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsLiftsReportTemplate", rpdsLiftsReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsLiftsReportDataSource", dataSources);
+                    break;
+                }
+                case "EMERGENCY_STRUCTURES": {
+                    soRpdsReport = rpdsReportRepository.getSoRpdsReport(repairPlanId, repairType.getId(), emptyOnly);
+                    params.put("rpdsEmergencyStructuresReportTemplate", rpdsEmergencyStructuresReportTemplate);
+                    dataSources = new JRBeanCollectionDataSource(soRpdsReport);
+                    params.put("rpdsEmergencyStructuresReportDataSource", dataSources);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        // report
+        JasperReportTemplate template =
+                new JasperReportTemplate
+                        .JasperReportTemplateBuilder(format, rpdsReportTemplate)
+                        .reportName(String.format("%s_%d.%s", "Поля_для_РПДС", year, format.getExtension()))
+                        .params(params)
+                        .build();
+        return ReportUtils.generateReport(template);
+    }
+
+}
+
