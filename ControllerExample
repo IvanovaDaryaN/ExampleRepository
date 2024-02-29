@@ -1,0 +1,84 @@
+package *;
+
+import *
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Pageable;
+import org.springframework.hateoas.PagedResources;
+import org.springframework.hateoas.Resource;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.WebDataBinder;
+import org.springframework.web.bind.annotation.*;
+import springfox.documentation.annotations.ApiIgnore;
+
+import java.beans.PropertyEditor;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * @author ivanova on 29.11.2022
+ * #*
+ */
+
+@PreAuthorize("hasAnyAuthority('flat_penalty_mobile_read')")
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+@RequestMapping("api/penaltyMobile")
+@RestController
+public class FlatPenaltyMobileController {
+
+    private final FlatPenaltyMobileService flatPenaltyMobileService;
+
+    private final PropertyEditor datePropertyEditor;
+    private final List<DocumentTarget> targets;
+
+    @InitBinder
+    public void initBinder(WebDataBinder dataBinder) {
+        dataBinder.registerCustomEditor(Date.class, datePropertyEditor);
+        dataBinder.registerCustomEditor(EntityDocumentTarget.class, new DocumentTargetConverter(targets));
+    }
+
+    @GetMapping(value = "{id}")
+    public FlatPenaltyMobileDto findOne(@PathVariable Long id) {
+        return flatPenaltyMobileService.findOne(id);
+    }
+
+    @GetMapping(value = "/pageable")
+    public PagedResources<Resource<FlatPenaltyMobileDto>> findAllPageable(@ModelAttribute FlatDiscountParams params,
+                                                                          Pageable pageable) {
+        return flatPenaltyMobileService.findAllPageable(params, pageable);
+    }
+
+    @PreAuthorize("hasAnyAuthority('flat_penalty_mobile_write')")
+    @PostMapping
+    public FlatPenaltyMobileDto saveOrUpdate(@RequestBody FlatPenaltyMobileDto flatPenaltyMobileDto) {
+        return flatPenaltyMobileService.saveOrUpdate(flatPenaltyMobileDto);
+    }
+
+    @PreAuthorize("hasAnyAuthority('flat_penalty_mobile_write')")
+    @DeleteMapping(value = "{id}")
+    public void changeActiveStatus(@PathVariable Long id) {
+        flatPenaltyMobileService.changeActiveStatus(id);
+    }
+
+    @GetMapping(value = "/{id}/history")
+    public PagedResources<Resource<FlatPenaltyMobileLog>> findHistoryById(@PathVariable Long id,
+                                                                          @ApiIgnore Pageable pageable) {
+        return flatPenaltyMobileService.findHistoryById(id, pageable);
+    }
+
+    @GetMapping("/category")
+    public List<FlatPenaltyMobileCategory> findAllCategory() {
+        return flatPenaltyMobileService.findAllCategory();
+    }
+
+    @GetMapping("/status")
+    public List<FlatPenaltyMobileStatus> findAllStatus() {
+        return flatPenaltyMobileService.findAllStatus();
+    }
+
+    @GetMapping("/type")
+    public List<FlatPenaltyMobileType> findAllType() {
+        return flatPenaltyMobileService.findAllType();
+    }
+
+}
