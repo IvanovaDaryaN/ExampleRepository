@@ -1,0 +1,106 @@
+package *;
+
+import *;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PagedResourcesAssembler;
+import org.springframework.hateoas.PagedResources;
+import org.springframework.hateoas.Resource;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import java.util.List;
+
+/**
+ * @author ivanova on 29.11.2022
+ * #*
+ */
+
+@Service
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+public class FlatPenaltyMobileService {
+
+    @PersistenceContext
+    private EntityManager entityManager;
+
+    private final FlatPenaltyMobileCategoryRepository flatPenaltyMobileCategoryRepository;
+    private final FlatPenaltyMobileLogRepository flatPenaltyMobileLogRepository;
+    private final FlatPenaltyMobileRepository flatPenaltyMobileRepository;
+    private final FlatPenaltyMobileStatusRepository flatPenaltyMobileStatusRepository;
+    private final FlatPenaltyMobileTypeRepository flatPenaltyMobileTypeRepository;
+
+    private final CustomLogService customLogService;
+
+    private final FlatPenaltyMobileMapper flatPenaltyMobileMapper;
+
+    private PagedResourcesAssembler<FlatPenaltyMobileLog> flatPenaltyMobileLogPagedResourcesAssembler = new PagedResourcesAssembler<>(null, null);
+    private PagedResourcesAssembler<FlatPenaltyMobileDto> flatPenaltyMobilePagedResourcesAssembler = new PagedResourcesAssembler<>(null, null);
+
+    public FlatPenaltyMobileDto findOne(Long id) {
+        return flatPenaltyMobileMapper.toDto(flatPenaltyMobileRepository.findOne(id));
+    }
+
+    public PagedResources<Resource<FlatPenaltyMobileDto>> findAllPageable(FlatDiscountParams params, Pageable pageable) {
+        return flatPenaltyMobilePagedResourcesAssembler.toResource(flatPenaltyMobileRepository.findAllPageable(params, pageable));
+    }
+
+    public List<FlatPenaltyMobileDto> getPenaltyMobileByFlatId(Long flatId, FlatDiscountParams params) {
+        params.setFlatId(flatId);
+        return flatPenaltyMobileRepository.findAllByDiscountParams(params);
+    }
+
+    @Transactional
+    public FlatPenaltyMobileDto saveOrUpdate(FlatPenaltyMobileDto flatPenaltyMobileDto) {
+        FlatPenaltyMobile flatPenaltyMobileOld = new FlatPenaltyMobile();
+        if (flatPenaltyMobileDto.getId() != null) {
+            flatPenaltyMobileOld = flatPenaltyMobileRepository.findOne(flatPenaltyMobileDto.getId());
+            entityManager.detach(flatPenaltyMobileOld);
+        }
+
+        FlatPenaltyMobile flatPenaltyMobile = flatPenaltyMobileMapper.toEntity(flatPenaltyMobileDto);
+
+        if (flatPenaltyMobile.getId() == null) {
+            flatPenaltyMobileRepository.save(flatPenaltyMobile);
+            customLogService.getChangeLog(null, flatPenaltyMobile, FlatPenaltyMobileLog.class);
+            return flatPenaltyMobileMapper.toDto(flatPenaltyMobile);
+        }
+        customLogService.getChangeLog(flatPenaltyMobileOld, flatPenaltyMobile, FlatPenaltyMobileLog.class);
+        return flatPenaltyMobileMapper.toDto(flatPenaltyMobileRepository.save(flatPenaltyMobile));
+    }
+
+    @Transactional
+    public void changeActiveStatus(Long id) {
+        FlatPenaltyMobile flatPenaltyMobile = flatPenaltyMobileRepository.findOne(id);
+        flatPenaltyMobile.setActive(!flatPenaltyMobile.isActive());
+        if (flatPenaltyMobile.isActive())
+            customLogService.save(FlatPenaltyMobileLog.class,
+                    new LogEntry("penalty_mobile", "active", LoggableEntity.MessageType.RESTORE, id, null, new LogEntry.LogEntryComment(LoggableEntity.MessageType.RESTORE.getDescription(),
+                            "Заявка по мобилизации", "Установлена в положение 'Активна'", flatPenaltyMobile.getSourceDescription())));
+        else
+            customLogService.save(FlatPenaltyMobileLog.class,
+                    new LogEntry("penalty_mobile", "active", LoggableEntity.MessageType.DELETED, id, null, new LogEntry.LogEntryComment(LoggableEntity.MessageType.DELETED.getDescription(),
+                            "Заявка по мобилизации", "Установлена в положение 'Удалена'", flatPenaltyMobile.getSourceDescription())));
+
+        flatPenaltyMobileRepository.save(flatPenaltyMobile);
+    }
+
+    public PagedResources<Resource<FlatPenaltyMobileLog>> findHistoryById(Long objectId, Pageable pageable) {
+        return flatPenaltyMobileLogPagedResourcesAssembler.toResource(flatPenaltyMobileLogRepository.findByObjectId(objectId, pageable));
+    }
+
+    public List<FlatPenaltyMobileCategory> findAllCategory() {
+        return flatPenaltyMobileCategoryRepository.findAll();
+    }
+
+    public List<FlatPenaltyMobileStatus> findAllStatus() {
+        return flatPenaltyMobileStatusRepository.findAll();
+    }
+
+    public List<FlatPenaltyMobileType> findAllType() {
+        return flatPenaltyMobileTypeRepository.findAll();
+    }
+
+}
