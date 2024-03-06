@@ -1,0 +1,90 @@
+package com.evelopers.kap.data.domain.report.auction;
+
+import lombok.Getter;
+import lombok.Setter;
+
+import javax.persistence.*;
+import java.math.BigDecimal;
+import java.util.Date;
+
+/**
+ * @author ivanova on 06.07.2023
+ * #11048
+ */
+
+@NamedStoredProcedureQuery(
+        name = "reportAuctionInsurance",
+        resultClasses = AuctionInsuranceReport.class,
+        procedureName = "get_report_auction_insurance",
+        parameters = {
+        @StoredProcedureParameter(mode = ParameterMode.IN, name = "year", type = Integer.class),
+}
+)
+
+@Getter
+@Setter
+@Entity
+public class AuctionInsuranceReport {
+
+    @Id
+    @Column(name = "num_pp")
+    private Long numPP;
+
+    @Column(name = "auction_contract_number")
+    private String auctionContractNumber;
+
+    @Column(name = "repair_work_kind_name")
+    private String repairWorkKindName;
+
+    @Column(name = "auction_contract_date")
+    private Date auctionContractDate;
+
+    @Column(name = "contractor_name")
+    private String contractorName;
+
+    @Column(name = "contractor_insurance_name")
+    private String contractorInsuranceName;
+
+    @Column(name = "contract_number")
+    private String contractNumber;
+
+    @Column(name = "contract_date")
+    private Date contractDate;
+
+    @Column(name = "policy_number")
+    private String policyNumber;
+
+    @Column(name = "policy_date")
+    private Date policyDate;
+
+    @Column(name = "contract_period_start")
+    private Date contractPeriodStart;
+
+    @Column(name = "contract_period_end")
+    private Date contractPeriodEnd;
+
+    @Column(name = "work_period_start")
+    private Date workPeriodStart;
+
+    @Column(name = "work_period_end")
+    private Date workPeriodEnd;
+
+    @Column(name = "guarantee_period_start")
+    private Date guaranteePeriodStart;
+
+    @Column(name = "guarantee_period_end")
+    private Date guaranteePeriodEnd;
+
+    @Column(name="civil_response_cost")
+    private BigDecimal civilResponseCost;
+
+    @Column(name="work_period_cost")
+    private BigDecimal workPeriodCost;
+
+    @Column(name="guarantee_period_cost")
+    private BigDecimal guaranteePeriodCost;
+
+    @Column(name="payment_order_cost")
+    private BigDecimal paymentOrderCost;
+
+}
