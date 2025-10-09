@@ -1,0 +1,538 @@
+package com.evelopers.kap.account.service.repair.work;
+
+import com.evelopers.kap.account.model.composite.MailTemplate;
+import com.evelopers.kap.account.model.composite.Pair;
+import com.evelopers.kap.account.repository.file.FileExtensionTypeRepository;
+import com.evelopers.kap.account.repository.file.repair.work.FileRepairWorkGatiHistoryRepository;
+import com.evelopers.kap.account.repository.file.repair.work.FileRepairWorkGatiRepository;
+import com.evelopers.kap.account.repository.repair.DepartmentDocKindRepository;
+import com.evelopers.kap.account.repository.repair.work.gati.*;
+import com.evelopers.kap.account.repository.user.department.UserDepartmentRepository;
+import com.evelopers.kap.account.repository.user.UserRepository;
+import com.evelopers.kap.account.service.MailService;
+import com.evelopers.kap.account.service.MessagingService;
+import com.evelopers.kap.account.service.environment.EnvironmentService;
+import com.evelopers.kap.account.service.log.CustomLogService;
+import com.evelopers.kap.account.service.log.LogEntry;
+import com.evelopers.kap.account.service.order.RepairWorkOrderService;
+import com.evelopers.kap.account.service.repair.work.template.RepairWorkGatiTemplateService;
+import com.evelopers.kap.account.service.report.CountPagesInFiles;
+import com.evelopers.kap.account.service.report.NamedByteArrayOutPutStream;
+import com.evelopers.kap.commons.Const;
+import com.evelopers.kap.commons.SecurityUtils;
+import com.evelopers.kap.commons.enums.Sex;
+import com.evelopers.kap.commons.interfaces.LoggableEntity;
+import com.evelopers.kap.data.domain.auth.DepartmentDocKind;
+import com.evelopers.kap.data.domain.auth.User;
+import com.evelopers.kap.data.domain.auth.UserDepartment;
+import com.evelopers.kap.data.domain.contractor.Contractor;
+import com.evelopers.kap.data.domain.file.repair.work.FileRepairWorkGati;
+import com.evelopers.kap.data.domain.file.repair.work.FileRepairWorkGatiHistory;
+import com.evelopers.kap.data.domain.log.repair.work.RepairWorkGatiLog;
+import com.evelopers.kap.data.domain.repair.work.dto.RepairWorkGatiOrderLetterDto;
+import com.evelopers.kap.data.domain.repair.work.entity.gati.*;
+import com.evelopers.kap.data.domain.repair.work.mapper.RepairWorkGatiMapper;
+import com.evelopers.kap.data.domain.repair.work.procedure.RepairWorkGatiLetterNeed;
+import com.google.common.collect.Sets;
+import fr.opensagres.poi.xwpf.converter.pdf.PdfConverter;
+import fr.opensagres.poi.xwpf.converter.pdf.PdfOptions;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import javax.transaction.Transactional;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
+import java.util.stream.Collectors;
+
+import static com.evelopers.kap.commons.Const.System.SLASH;
+
+/**
+ * @author ivanova
+ */
+
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+@Service
+public class RepairWorkGatiLetterService {
+
+    private final DepartmentDocKindRepository departmentDocKindRepository;
+    private final FileExtensionTypeRepository fileExtensionTypeRepository;
+    private final FileRepairWorkGatiHistoryRepository fileRepairWorkGatiHistoryRepository;
+    private final FileRepairWorkGatiRepository fileRepairWorkGatiRepository;
+    private final RepairWorkGatiNumberCypherRepository repairWorkGatiNumberCypherRepository;
+    private final RepairWorkGatiOrderLetterRepository repairWorkGatiOrderLetterRepository;
+    private final RepairWorkGatiOrderLetterSourceRepository repairWorkGatiOrderLetterSourceRepository;
+    private final RepairWorkGatiOrderRepository repairWorkGatiOrderRepository;
+    private final RepairWorkGatiRepository repairWorkGatiRepository;
+    private final UserDepartmentRepository userDepartmentRepository;
+    private final UserRepository userRepository;
+
+    private final CustomLogService customLogService;
+    private final EnvironmentService environmentService;
+    private final MailService mailService;
+    private final MessagingService messagingService;
+    private final RepairWorkGatiTemplateService repairWorkGatiTemplateService;
+    private final RepairWorkOrderService repairWorkOrderService;
+    private final RepairWorkOskService repairWorkOskService;
+
+    private final RepairWorkGatiMapper repairWorkGatiMapper;
+
+    private final CountPagesInFiles countPagesInFiles;
+
+    @Value("${document.upload.folder}")
+    private String documentsFolder;
+
+    @Value("${document.upload.folder}")
+    private String documentPath;
+
+    public List<RepairWorkGatiOrderLetterDto> getOrderLetter(Long repairWorkGatiOrderId) {
+        return repairWorkGatiOrderLetterRepository.findByRepairWorkGatiOrderId(repairWorkGatiOrderId)
+                .stream()
+                .map(repairWorkGatiMapper::toDtoLetter)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional
+    public ResponseEntity<String> generateGatiLetter(Long repairWorkGatiId, Long repairWorkGatiOrderId) {
+        RepairWorkGati repairWorkGati;
+        RepairWorkGatiOrder repairWorkGatiOrder = null;
+        RepairWorkGatiLetterNeed gatiLetterNeed;
+        if (repairWorkGatiOrderId != null) {
+            repairWorkGatiOrder = repairWorkGatiOrderRepository.findOne(repairWorkGatiOrderId);
+            repairWorkGati = repairWorkGatiOrder.getRepairWorkGati();
+            gatiLetterNeed = generateOrderLetter(repairWorkGatiOrderId);
+        }
+        else {
+            repairWorkGati = repairWorkGatiRepository.findOne(repairWorkGatiId);
+            gatiLetterNeed = generateGatiLetter(repairWorkGatiId);
+        }
+
+        if (gatiLetterNeed != null) {
+            sendGatiErrorMail(Collections.singletonList(gatiLetterNeed));
+            return ResponseEntity.status(HttpStatus.CONFLICT).build();
+        }
+
+        sendGatiInfoFondMail(Collections.singletonList(
+                RepairWorkGatiLetterNeed
+                        .builder()
+                        .repairWorkGati(repairWorkGati)
+                        .repairWorkGatiOrder(repairWorkGatiOrder)
+                        .build())
+        );
+
+        return ResponseEntity.status(HttpStatus.OK).build();
+    }
+
+    @Scheduled(cron = "0 30 8 * * *")
+    @Transactional
+    public void generateGatiLetters() {
+        if (!environmentService.isProdConnection()) return;
+
+        List<RepairWorkGatiLetterNeed> gatiLetterNeedList = repairWorkGatiRepository.getRepairWorkGatiLetterNeed(null, null);
+        List<RepairWorkGatiLetterNeed> gatiErrorList = gatiLetterNeedList
+                .stream()
+                .map(item -> item.getRepairWorkGatiOrder() != null ?
+                        generateOrderLetter(item.getRepairWorkGatiOrder().getId()) : generateGatiLetter(item.getRepairWorkGati().getId()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        gatiLetterNeedList.removeAll(gatiErrorList);
+        if (!gatiLetterNeedList.isEmpty())
+            sendGatiInfoFondMail(gatiLetterNeedList);
+
+        if (!gatiErrorList.isEmpty())
+            sendGatiErrorMail(gatiErrorList);
+    }
+
+    public boolean checkNeedLetter(Long repairWorkOrderId) {
+        RepairWorkGatiOrder repairWorkGatiOrder = repairWorkGatiOrderRepository.findOne(repairWorkOrderId);
+        return !repairWorkGatiRepository.getRepairWorkGatiLetterNeed(repairWorkGatiOrder.getRepairWorkGati().getId(), repairWorkGatiOrder.getId()).isEmpty();
+    }
+
+    public void createFileRepairWorkGatiHistory(Long repairWorkGatiId, Long repairWorkGatiOrderId, Long departmentDocKindId, String nameFile) {
+        FileRepairWorkGati orderFile = fileRepairWorkGatiRepository.findByObjectIdAndObjectSubIdAndDepartmentDocKindIdAndNameFile(repairWorkGatiId, repairWorkGatiOrderId, departmentDocKindId, nameFile);
+        if (orderFile != null) {
+            List<RepairWorkGatiOrderLetterSource> orderLetterSourceList = repairWorkGatiOrderLetterSourceRepository.findByOrderFileId(orderFile.getId());
+
+            if (orderLetterSourceList.isEmpty())
+                return;
+
+            FileRepairWorkGatiHistory fileRepairWorkGatiHistory = new FileRepairWorkGatiHistory();
+            BeanUtils.copyProperties(orderFile, fileRepairWorkGatiHistory);
+
+            String pathFolder = orderFile.getPathFolder().replaceAll("\\w*$", "") + "history";
+            String originalFilename = orderFile.getNameFile();
+
+            FileRepairWorkGatiHistory fileHistory = fileRepairWorkGatiHistoryRepository.findByPathFile(pathFolder + SLASH + originalFilename);
+            if (fileHistory != null)
+                originalFilename = FilenameUtils.removeExtension(originalFilename) + "_" + System.currentTimeMillis() +
+                        "." + FilenameUtils.getExtension(originalFilename);
+
+            fileRepairWorkGatiHistory.setPathFolder(pathFolder);
+            fileRepairWorkGatiHistory.setPathFile(pathFolder + SLASH + originalFilename);
+            fileRepairWorkGatiHistory.setNameFile(originalFilename);
+
+            fileRepairWorkGatiHistoryRepository.save(fileRepairWorkGatiHistory);
+
+            Path sourcePath = Paths.get(documentPath, orderFile.getPathFile());
+            Path targetPath = Paths.get(documentPath, fileRepairWorkGatiHistory.getPathFile());
+            try {
+                Files.createDirectories(targetPath.getParent());
+                Files.copy(sourcePath, targetPath);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            orderLetterSourceList
+                    .forEach(item -> {
+                        item.setHist(true);
+                        repairWorkGatiOrderLetterSourceRepository.save(item);
+                    });
+        }
+    }
+
+    private RepairWorkGatiLetterNeed generateOrderLetter(Long id) {
+        RepairWorkGatiOrderLetter gatiOrderLetter = null;
+
+        RepairWorkGatiOrder repairWorkGatiOrder = repairWorkGatiOrderRepository.findOne(id);
+        RepairWorkGati repairWorkGati = repairWorkGatiOrder.getRepairWorkGati();
+        RepairWorkGatiLetterNeed result = RepairWorkGatiLetterNeed.builder().repairWorkGati(repairWorkGati).repairWorkGatiOrder(repairWorkGatiOrder).build();
+
+        try {
+            gatiOrderLetter = formOrderLetter(repairWorkGatiOrder);
+            FileRepairWorkGati letterFile = gatiOrderLetter.getLetterFile();
+            if (letterFile != null) {
+                if (environmentService.isProdConnection()) {
+                    MailTemplate mailTemplate = getLetterMailTemplate(repairWorkGati, repairWorkGatiOrder);
+
+                    List<File> fileList = new ArrayList<File>();
+                    fileList.add(new File(documentsFolder + SLASH + letterFile.getPathFile()));
+                    fileList.addAll(
+                            gatiOrderLetter.getRepairWorkGatiOrderLetterSources()
+                                    .stream()
+                                    .map(item ->
+                                            new File(documentsFolder + Const.System.SLASH +
+                                                    (item.isHist() ? fileRepairWorkGatiHistoryRepository.findOne(item.getOrderFileId()) :
+                                                            fileRepairWorkGatiRepository.findOne(item.getOrderFileId())).getPathFile()))
+                                    .collect(Collectors.toList()));
+
+                    mailService.notifyFileList(getContractorMailList(repairWorkGati), mailTemplate, fileList, true);
+                }
+
+                gatiOrderLetter.setSentDate(new Date());
+                repairWorkGatiOrderLetterRepository.save(gatiOrderLetter);
+                return null;
+            }
+            return result;
+
+        } catch (Exception e) {
+            deleteGatiOrderLetterData(repairWorkGatiOrder, gatiOrderLetter);
+            return result;
+        }
+    }
+
+    private RepairWorkGatiLetterNeed generateGatiLetter(Long id) {
+        RepairWorkGati repairWorkGati = repairWorkGatiRepository.findOne(id);
+        RepairWorkGatiLetterNeed result = RepairWorkGatiLetterNeed.builder().repairWorkGati(repairWorkGati).build();
+        File file = null;
+
+        try {
+            String pathFile = formGatiLetter(repairWorkGati);
+
+            if (environmentService.isProdConnection()) {
+                if (StringUtils.isNotEmpty(pathFile)) {
+                    MailTemplate mailTemplate = getLetterMailTemplate(repairWorkGati, null);
+                    file = new File(pathFile);
+
+                    mailService.notify(getContractorMailList(repairWorkGati), mailTemplate, file, true);
+                    return null;
+                }
+                return result;
+            }
+            return null;
+        } catch (Exception e) {
+            deleteGatiLetterData(repairWorkGati, file);
+            return result;
+        }
+    }
+
+    private void sendGatiInfoFondMail(List<RepairWorkGatiLetterNeed> gatiLetterNeedList) {
+        if (!environmentService.isProdConnection()) return;
+
+        Logger logger = LoggerFactory.getLogger("billing");
+
+        Map<String, Map<Pair<User, User>, List<RepairWorkGatiLetterNeed>>> letterNeedMap =
+                gatiLetterNeedList
+                        .stream()
+                        .collect(Collectors.groupingBy(item ->
+                                        new ArrayList<>(repairWorkOskService.getOskDepartmentCodes(Sets.newHashSet(item.getRepairWorkGati().getRepairWork().getRepairType().getCode()))).get(0), //get(0) valid: getOskDepartmentCodes returns 1 value from 1-size set
+                                Collectors.groupingBy(item ->
+                                        repairWorkOrderService.getResponsibleUser(item.getRepairWorkGati().getRepairWork().getId(), item.getRepairWorkGati().getAuctionContract().getContractor().getId()))
+                        ));
+
+        try {
+            for (Map.Entry<String, Map<Pair<User, User>, List<RepairWorkGatiLetterNeed>>> letterNeedEntry : letterNeedMap.entrySet()) {
+                for (Map.Entry<Pair<User, User>, List<RepairWorkGatiLetterNeed>> entry : letterNeedEntry.getValue().entrySet()) {
+                    StringBuilder bodyMessage = new StringBuilder();
+                    for (RepairWorkGatiLetterNeed gatiLetterNeed : entry.getValue()) {
+                        RepairWorkGati repairWorkGati = gatiLetterNeed.getRepairWorkGati();
+                        RepairWorkGatiOrder repairWorkGatiOrder = gatiLetterNeed.getRepairWorkGatiOrder();
+                        bodyMessage.append(getWorkMessage(gatiLetterNeed.getRepairWorkGati(), false));
+
+                        if (repairWorkGatiOrder != null) {
+                            if (!repairWorkGatiOrder.isPrivateLand()) {
+                                bodyMessage.append("открыт ордер ГАТИ ").append(repairWorkGatiOrder.getOrderNumberFull());
+                                if (repairWorkGatiOrder.getParentOrderId() != null)
+                                    bodyMessage.append(" взамен ").append(repairWorkGatiOrderRepository.findOne(repairWorkGatiOrder.getParentOrderId()).getOrderNumberFull());
+                            } else {
+                                if (!fileRepairWorkGatiRepository.findByObjectIdAndObjectSubIdAndDepartmentDocKindId(repairWorkGati.getId(), repairWorkGatiOrder.getId(), 70L).isEmpty())
+                                    bodyMessage.append("есть участки, где оформление ордера не требуется");
+                                else
+                                    bodyMessage.append("ордер ГАТИ не требуется");
+                            }
+                        } else {
+                            bodyMessage.append("ордер ГАТИ не требуется");
+                        }
+                        bodyMessage.append(".<br>");
+                    }
+                    bodyMessage.append("<br><br>Данное уведомление сформировано автоматически и не требует ответа.");
+                    messagingService.sendMail("Информирование об ордере ГАТИ", bodyMessage.toString(), null, getFondMailList(letterNeedEntry.getKey(), entry.getKey()));
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error during sending gati order info mail", e);
+        }
+    }
+
+    private void sendGatiErrorMail(List<RepairWorkGatiLetterNeed> repairWorkGatiLetterNeedList) {
+        if (!environmentService.isProdConnection()) return;
+
+        try {
+            StringBuilder bodyMessage = new StringBuilder();
+            for (RepairWorkGatiLetterNeed gatiLetterNeed: repairWorkGatiLetterNeedList) {
+                bodyMessage
+                        .append(getWorkMessage(gatiLetterNeed.getRepairWorkGati(), false))
+                        .append("произошла ошибка при информировании о необходимости открытия ордера ГАТИ");
+
+                RepairWorkGatiOrder repairWorkGatiOrder = gatiLetterNeed.getRepairWorkGatiOrder();
+                if (repairWorkGatiOrder != null)
+                    bodyMessage.append(" ").append(repairWorkGatiOrder.getOrderNumberFull()).append(repairWorkGatiOrder.isPrivateLand() ? " (частная территория)" : "");
+
+                bodyMessage.append(".<br>");
+            }
+            bodyMessage.append("<br><br>Данное уведомление сформировано автоматически и не требует ответа.");
+
+            List<User> emails;
+            if (SecurityUtils.getLoggedinUser() != null && StringUtils.isNotEmpty(SecurityUtils.getLoggedinUser().getEmail()))
+                emails = Collections.singletonList(SecurityUtils.getLoggedinUser());
+            else
+                emails = Collections.singletonList(userRepository.findChiefOfDepartment(userDepartmentRepository.findByCode("GATI").getId()));
+
+            messagingService.sendMail("Информирование об ордере ГАТИ. Ошибка", bodyMessage.toString(), null, emails);
+
+        } catch (Exception ignored) {
+        }
+    }
+
+    private RepairWorkGatiOrderLetter formOrderLetter(RepairWorkGatiOrder repairWorkGatiOrder) throws IOException {
+        RepairWorkGatiOrderLetter repairWorkGatiOrderLetter = new RepairWorkGatiOrderLetter();
+        repairWorkGatiOrderLetter.setRepairWorkGatiOrder(repairWorkGatiOrder);
+        repairWorkGatiOrderLetter.setLetterDate(new Date());
+        repairWorkGatiOrderLetter.setLetterNumber(generateNumber());
+        repairWorkGatiOrderLetter.setRepairWorkGatiOrderLetterSources(new ArrayList<>());
+
+        RepairWorkGati repairWorkGati = repairWorkGatiOrder.getRepairWorkGati();
+        NamedByteArrayOutPutStream orderLetterTemplate = repairWorkGatiTemplateService.getOrderLetterTemplate(repairWorkGatiOrderLetter);
+        DepartmentDocKind departmentDocKind = departmentDocKindRepository.findOne(72L);
+        String pathFolder = "repairWorkGati" + SLASH + repairWorkGati.getId() + SLASH + "order" + SLASH + repairWorkGatiOrder.getId() + SLASH + departmentDocKind.getNamePath();
+
+        String pathFile = pathFolder + SLASH + orderLetterTemplate.getFileName().replace(".docx", ".pdf");
+        Path path = Paths.get(documentsFolder, pathFile);
+        Files.createDirectories(path.getParent());
+        convertToPdf(orderLetterTemplate, path);
+
+        repairWorkGatiOrderLetter.setLetterFile(saveFileLetter(repairWorkGati, repairWorkGatiOrder, pathFile, path, pathFolder, departmentDocKind));
+
+        fileRepairWorkGatiRepository.findByObjectIdAndObjectSubIdAndDepartmentDocKindId(repairWorkGati.getId(), repairWorkGatiOrder.getId(), 70L)
+                .stream()
+                .map(file -> {
+                    RepairWorkGatiOrderLetterSource source = new RepairWorkGatiOrderLetterSource();
+                    source.setRepairWorkGatiOrderLetter(repairWorkGatiOrderLetter);
+                    source.setOrderFileId(file.getId());
+                    return source;})
+                .forEach(repairWorkGatiOrderLetter.getRepairWorkGatiOrderLetterSources()::add);
+
+
+        return repairWorkGatiOrderLetterRepository.save(repairWorkGatiOrderLetter);
+    }
+
+    private String formGatiLetter(RepairWorkGati repairWorkGati) throws IOException {
+        NamedByteArrayOutPutStream gatiLetterTemplate = repairWorkGatiTemplateService.getLetterTemplate(repairWorkGati, generateNumber());
+        DepartmentDocKind departmentDocKind = departmentDocKindRepository.findOne(73L);
+        String pathFolder = "repairWorkGati" + SLASH + repairWorkGati.getId() + SLASH + departmentDocKind.getNamePath();
+        String pathFile = pathFolder + SLASH + gatiLetterTemplate.getFileName().replace(".docx", ".pdf");
+        Path path = Paths.get(documentsFolder, pathFile);
+        Files.createDirectories(path.getParent());
+        convertToPdf(gatiLetterTemplate, path);
+
+        saveFileLetter(repairWorkGati, null, pathFile, path, pathFolder, departmentDocKind);
+
+        return documentsFolder + SLASH + pathFile;
+    }
+
+    private FileRepairWorkGati saveFileLetter(RepairWorkGati repairWorkGati, RepairWorkGatiOrder repairWorkGatiOrder, String pathFile, Path path, String pathFolder, DepartmentDocKind docKind) {
+        FileRepairWorkGati fileRepairWorkGati = fileRepairWorkGatiRepository.findByPathFile(pathFile);
+        if (fileRepairWorkGati != null)
+            return fileRepairWorkGati;
+
+        FileRepairWorkGati file = new FileRepairWorkGati();
+        file.setObjectId(repairWorkGati.getId());
+        if (repairWorkGatiOrder != null) file.setObjectSubId(repairWorkGatiOrder.getId());
+        file.setPathFile(pathFile);
+        file.setNameFile(path.toFile().getName());
+        file.setPathFolder(pathFolder);
+        file.setDepartmentDocKind(docKind);
+        file.setFileExtensionType(fileExtensionTypeRepository.findByNameIgnoreCase("pdf"));
+        file.setCountPages(countPagesInFiles.countPagesDocument(file.getFileExtensionType().getName(), path));
+        fileRepairWorkGatiRepository.save(file);
+
+        customLogService.save(RepairWorkGatiLog.class,
+                new LogEntry("file_repair_work_gati", null, LoggableEntity.MessageType.ADDED, repairWorkGati.getId(), repairWorkGatiOrder != null ? repairWorkGatiOrder.getId() : null,
+                        new LogEntry.LogEntryComment(
+                                LoggableEntity.MessageType.ADDED.getDescription(), "Документ", file.getNameFile(),
+                                "[Раздел: " + docKind.getName() + "]"+ (repairWorkGatiOrder != null ? repairWorkGatiOrder.getSourceDescription() : repairWorkGati.getSourceDescription()))
+                ));
+
+        return file;
+    }
+
+    public String generateNumber() {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(new Date());
+        Integer year = calendar.get(Calendar.YEAR);
+        RepairWorkGatiLetterNumberCypher numberCypher = repairWorkGatiNumberCypherRepository.findByYear(year);
+        if (numberCypher == null) {
+            numberCypher = new RepairWorkGatiLetterNumberCypher();
+            numberCypher.setYear(year);
+            numberCypher.setCypherSeq(1);
+            repairWorkGatiNumberCypherRepository.save(numberCypher);
+        }
+
+        String cypherNumber = numberCypher.getCypherSeq() + "/" + org.apache.commons.lang3.StringUtils.right(numberCypher.getYear().toString(), 2);
+        numberCypher.setCypherSeq(numberCypher.getCypherSeq() + 1);
+        repairWorkGatiNumberCypherRepository.save(numberCypher);
+        return cypherNumber;
+    }
+
+    private void convertToPdf(NamedByteArrayOutPutStream template, Path path) {
+        try (OutputStream letterPdf = new FileOutputStream(path.toFile());
+             InputStream doc = new ByteArrayInputStream(template.getBaos().toByteArray())) {
+            XWPFDocument letterDocx = new XWPFDocument(doc);
+            PdfConverter.getInstance().convert(letterDocx, letterPdf, PdfOptions.create());
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private String getWorkMessage(RepairWorkGati repairWorkGati, boolean isPublic) {
+        String workInfo;
+        if (isPublic) workInfo = "По адресу %s %s по договору %s ";
+        else workInfo = "По адресу <a href=\"https://asu.fkr-spb.ru/#/repairs/" + repairWorkGati.getRepairWork().getId() + "/gati\">%s %s</a> по договору %s ";
+
+        return String.format(workInfo, repairWorkGati.getRepairWork().getHouse().getFullAddress(),
+                    repairWorkGati.getRepairWork().getRepairType().getName(),
+                    repairWorkGati.getAuctionContract().getContractNumber());
+    }
+
+    private MailTemplate getLetterMailTemplate(RepairWorkGati repairWorkGati, RepairWorkGatiOrder repairWorkGatiOrder) {
+        String message = getWorkMessage(repairWorkGati, true);
+        if (repairWorkGatiOrder != null && !repairWorkGatiOrder.isPrivateLand())
+            message += "открыт ордер ГАТИ " + repairWorkGatiOrder.getOrderNumberFull();
+        else
+            message += "ордер ГАТИ не требуется";
+
+        message += ".<br><br><br>Данное уведомление сформировано автоматически и не требует ответа.";
+
+        return new MailTemplate("Информирование об ордере ГАТИ", message);
+    }
+
+    private List<String> getContractorMailList(RepairWorkGati repairWorkGati) {
+        List<String> emails = new ArrayList<>();
+        if (repairWorkGati != null && repairWorkGati.getAuctionContract() != null) {
+            Contractor contractor = repairWorkGati.getAuctionContract().getContractor();
+            if (contractor != null && contractor.getEmail() != null) {
+                emails.add(contractor.getEmail());
+            }
+        }
+
+        return emails;
+    }
+
+    private List<User> getFondMailList(String oskDepartmentCode, Pair<User, User> responsibleUser) {
+        List<User> emails = new ArrayList<>();
+        UserDepartment userDepartment = userDepartmentRepository.findByCode(oskDepartmentCode);
+        if (userDepartment != null) {
+            emails = userRepository.findUsersByUserPositionIdsAndUserDepartmentId(Arrays.asList(6L, 7L, 142L), userDepartment.getId())
+                    .stream()
+                    .filter(user -> StringUtils.isNotEmpty(user.getEmail()) && user.isEnabled())
+                    .collect(Collectors.toList());
+        }
+
+        User userMain = responsibleUser.getMain();
+        if (userMain != null && userMain.isEnabled() && StringUtils.isNotEmpty(userMain.getEmail()))
+            emails.add(userMain);
+        
+        User userSub = responsibleUser.getSub();
+        if (userSub != null && userSub.isEnabled() && StringUtils.isNotEmpty(userSub.getEmail()))
+            emails.add(userSub);
+
+        return emails;
+    }
+
+    private void deleteGatiLetterData(RepairWorkGati repairWorkGati, File file) {
+        customLogService.save(RepairWorkGatiLog.class, new LogEntry("repair_work_gati", null,
+                LoggableEntity.MessageType.CHANGED, repairWorkGati.getId(), null,
+                new LogEntry.LogEntryComment(LoggableEntity.MessageType.CHANGED.getDescription() + Sex.NEUTRAL.getValue(), "Карточка ГАТИ",
+                        "Установлено в положение 'Ошибка при отправке письма'", repairWorkGati.getSourceDescription())));
+
+        if (file != null) {
+            FileUtils.deleteQuietly(file);
+            FileRepairWorkGati fileRepairWorkGati = fileRepairWorkGatiRepository.findByObjectIdAndObjectSubIdAndDepartmentDocKindIdAndNameFile(repairWorkGati.getId(), null, 73L, file.getName());
+            if (fileRepairWorkGati != null)
+                fileRepairWorkGatiRepository.delete(fileRepairWorkGati);
+        }
+    }
+
+    private void deleteGatiOrderLetterData(RepairWorkGatiOrder repairWorkGatiOrder, RepairWorkGatiOrderLetter gatiOrderLetter) {
+        customLogService.save(RepairWorkGatiLog.class, new LogEntry("repair_work_gati_order", null,
+                LoggableEntity.MessageType.CHANGED, repairWorkGatiOrder.getRepairWorkGati().getId(), repairWorkGatiOrder.getId(),
+                new LogEntry.LogEntryComment(LoggableEntity.MessageType.CHANGED.getDescription() + Sex.NEUTRAL.getValue(), "Ордер",
+                        "Установлено в положение 'Ошибка при отправке письма'", repairWorkGatiOrder.getSourceDescription())));
+
+        if (gatiOrderLetter != null) {
+            FileRepairWorkGati letterFile = gatiOrderLetter.getLetterFile();
+            repairWorkGatiOrderLetterRepository.delete(gatiOrderLetter);
+
+            if (letterFile != null) {
+                FileUtils.deleteQuietly(Paths.get(documentsFolder, letterFile.getPathFile()).toFile());
+                fileRepairWorkGatiRepository.delete(letterFile);
+            }
+        }
+    }
+
+}
