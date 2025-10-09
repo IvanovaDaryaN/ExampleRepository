@@ -1,0 +1,785 @@
+package com.evelopers.kap.account.integration.importpayment.service.direct;
+
+import com.evelopers.kap.account.integration.importpayment.model.BankStatementItem;
+import com.evelopers.kap.account.integration.importpayment.model.BankStatementItemParsedInfo;
+import com.evelopers.kap.account.integration.importpayment.model.BillAmountItem;
+import com.evelopers.kap.account.integration.importpayment.model.FlatYearMonthItem;
+import com.evelopers.kap.account.integration.importpayment.service.PaymentImportService;
+import com.evelopers.kap.account.io.jasper.ReportFormat;
+import com.evelopers.kap.account.io.jasper.ReportItem;
+import com.evelopers.kap.account.model.billing.DirectPaymentGroup;
+import com.evelopers.kap.account.model.billing.DirectPaymentRegisterErrorInfo;
+import com.evelopers.kap.account.model.billing.YearMonthItem;
+import com.evelopers.kap.account.model.composite.DecisionSpecAccountLink;
+import com.evelopers.kap.account.model.composite.Pair;
+import com.evelopers.kap.account.repository.address.external.reg.ExtHouseREGRepository;
+import com.evelopers.kap.account.repository.auction.payment.AuctionContractPaymentOrderRepository;
+import com.evelopers.kap.account.repository.bill.BillRepository;
+import com.evelopers.kap.account.repository.payment.PaymentRepository;
+import com.evelopers.kap.account.repository.decision.DecisionRepository;
+import com.evelopers.kap.account.repository.flat.FlatRepository;
+import com.evelopers.kap.account.repository.fond.FondInfoRepository;
+import com.evelopers.kap.account.repository.uncertain.UncertainPaymentRepository;
+import com.evelopers.kap.account.repository.uncertain.UncertainPaymentStatusRepository;
+import com.evelopers.kap.account.service.ExtSystemService;
+import com.evelopers.kap.account.service.MessagingService;
+import com.evelopers.kap.account.service.UserService;
+import com.evelopers.kap.account.service.billing.PaymentSessionService;
+import com.evelopers.kap.account.service.report.PaymentSessionReportService;
+import com.evelopers.kap.account.service.uncertain.UncertainPaymentDebitService;
+import com.evelopers.kap.commons.Const;
+import com.evelopers.kap.commons.FileUtils;
+import com.evelopers.kap.commons.annotation.RegisterField;
+import com.evelopers.kap.commons.exception.KapAccountException;
+import com.evelopers.kap.data.domain.auction.payment.AuctionContractPaymentOrder;
+import com.evelopers.kap.data.domain.auth.User;
+import com.evelopers.kap.data.domain.payment.entity.Payment;
+import com.evelopers.kap.data.domain.billing.PaymentSession;
+import com.evelopers.kap.data.domain.billing.PaymentSessionStatus;
+import com.evelopers.kap.data.domain.external.ExtSystem;
+import com.evelopers.kap.data.domain.external.ExtSystemCode;
+import com.evelopers.kap.data.domain.flat.entity.Flat;
+import com.evelopers.kap.data.domain.uncertain.UncertainPayment;
+import com.evelopers.kap.data.domain.uncertain.UncertainPaymentStatus;
+import com.evelopers.kap.data.domain.uncertain.dto.UncertainPaymentUniqueDto;
+import com.google.common.base.Optional;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.beanutils.BeanUtils;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.integration.annotation.ServiceActivator;
+import org.springframework.stereotype.Service;
+
+import javax.annotation.PostConstruct;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.math.BigDecimal;
+import java.nio.charset.Charset;
+import java.nio.file.*;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+@Service
+public class DirectPaymentImportService implements PaymentImportService {
+
+    private static Logger logger = LoggerFactory.getLogger("billing");
+
+    public final static Pattern accountPattern = Pattern.compile("(?<=\\D|^)\\d{9}(?=\\D|$)", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
+    public final static Pattern contractPattern = Pattern.compile("(\\d+/)*\\d+-\\d+/([а-яА-Яa-zA-Z]+/){2,}((\\d){4})(\\s*\\([р|p]\\))?", Pattern.UNICODE_CHARACTER_CLASS);
+
+    private final AuctionContractPaymentOrderRepository auctionContractPaymentOrderRepository;
+    private final BillRepository billRepository;
+    private final DecisionRepository decisionRepository;
+    private final ExtHouseREGRepository extHouseREGRepository;
+    private final FlatRepository flatRepository;
+    private final FondInfoRepository fondInfoRepository;
+    private final PaymentRepository paymentRepository;
+    private final UncertainPaymentRepository uncertainPaymentRepository;
+    private final UncertainPaymentStatusRepository uncertainPaymentStatusRepository;
+
+    private final ExtSystemService extSystemService;
+    private final MessagingService messagingService;
+    private final PaymentSessionService paymentSessionService;
+    private final PaymentSessionReportService paymentSessionReportService;
+    private final UncertainPaymentDebitService uncertainPaymentDebitService;
+    private final UserService userService;
+
+    private ExtSystem extSystem;
+
+    @Value("${payment.report.path}")
+    private String paymentReportPath;
+    @Value("${payment.resister.path}")
+    private String paymentRegisterPath;
+    @Value("${integration.filename.local.suffix}")
+    protected String localFilenameSuffix;
+    @Value("${temp}")
+    private String tempDirectory;
+
+    @PostConstruct
+    public void init() throws IOException {
+        Files.createDirectories(Paths.get(paymentReportPath).resolve(ExtSystemCode.DIRECT.getCode()));
+        Files.createDirectories(Paths.get(paymentRegisterPath).resolve(ExtSystemCode.DIRECT.getCode()));
+        this.extSystem = extSystemService.findByCode(ExtSystemCode.DIRECT.getCode());
+    }
+
+    @ServiceActivator(inputChannel = Const.Integration.CHANNEL_PAYMENTS_IMPORT_DIRECT)
+    @Override
+    public void doImport(File file) {
+        String fileName = StringUtils.removeEnd(file.getName(), localFilenameSuffix);
+        if (paymentSessionService.beginPaymentsImport()) {
+            logger.info("Payments import from file '{}' accepted.", fileName);
+            try {
+                doImport(file, false);
+            } finally {
+                paymentSessionService.endPaymentsImport();
+            }
+        } else {
+            logger.info("Payments import from file '{}' rejected cause another file is uploading already.", fileName);
+        }
+    }
+
+    /**
+     * 1. Parse file.
+     * 2. Create {@link UncertainPayment}.
+     * 3. Create {@link Payment}.
+     * 4. Match {@link UncertainPayment} and {@link Payment}.
+     * 5. Generate report.
+     *
+     * @param file     payments register file
+     * @param isManual false if file imports by integration, true otherwise.
+     * @return
+     */
+    @Override
+    public PaymentSession doImport(File file, boolean isManual) {
+        String originalFilename = file.getName();
+        List<Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>>> parsedInfoList = parseBankStatement(file);
+        List<BankStatementItemParsedInfo> itemListMain = parsedInfoList.stream()
+                .map(Pair::getSub)
+                .flatMap(Collection::stream)
+                .collect(Collectors.toList());
+
+        List<BankStatementItem> itemList = parsedInfoList.stream()
+                .map(Pair::getSub)
+                .flatMap(Collection::stream)
+                .map(BankStatementItemParsedInfo::getBankStatementItem)
+                .collect(Collectors.toList());
+        if (CollectionUtils.isNotEmpty(parsedInfoList)) {
+            Path filePath = FileUtils.createPathSafety(
+                    paymentRegisterPath,
+                    ExtSystemCode.DIRECT.getCode(),
+                    getCurrentDateFormatted() + "_" + originalFilename.toLowerCase());
+            String registerName = filePath.getFileName().toString();
+            PaymentSession paymentSession = paymentSessionService.createPaymentSession(extSystem, parsedInfoList.iterator().next().getSub().iterator().next().getBankStatementItem().getDate(), registerName, null, null);
+
+            try {
+                Map<Long, UncertainPayment> uncertainPaymentMap = createUncertainPayment(parsedInfoList, paymentSession, file.getName());
+                uncertainPaymentMap = uncertainPaymentRepository.bulkSave(uncertainPaymentMap); // fast saving uncertain payments
+
+                List<BankStatementItemParsedInfo> filledPaymentInfo = itemListMain.stream().filter(item -> item.getFlatIdFromComment() != null).collect(Collectors.toList());
+                Map<Long, Payment> paymentMap = createPayments(filledPaymentInfo);
+
+                itemListMain.stream().filter(item -> item.getAuctionContractPaymentOrder() != null).forEach(this::setUncertainPaymentToPaymentOrder);
+
+                BigDecimal paymentsSum = BigDecimal.ZERO;
+                for (Map.Entry<Long, Payment> paymentEntry : paymentMap.entrySet()) {
+                    Long key = paymentEntry.getKey();
+                    if (uncertainPaymentMap.get(key) != null) {
+                        Payment payment = paymentEntry.getValue();
+                        payment.setPaymentSession(paymentSession);
+                        payment.setContractor(paymentSession.getExtSystem());
+                        paymentsSum = paymentsSum.add(payment.getAmount());
+                        paymentsSum = paymentsSum.add(payment.getPenaltyAmount());
+                    } else {
+                        paymentMap.put(key, null);
+                    }
+                }
+
+                UncertainPaymentStatus clearRegistryStatus = uncertainPaymentStatusRepository.findByCode("CLEAR");
+                Map<Long, Payment> filledPaymentMap = paymentMap.entrySet().stream().filter(item -> item.getValue() != null)
+                        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+                paymentMap = paymentRepository.bulkSave(filledPaymentMap); // fast saving payments
+                for (Map.Entry<Long, Payment> paymentEntry : paymentMap.entrySet()) {
+                    Long key = paymentEntry.getKey();
+                    Payment payment = paymentEntry.getValue();
+                    UncertainPayment uncertainPayment = uncertainPaymentMap.get(key);
+                    if (uncertainPayment != null && payment != null) {
+                        uncertainPaymentRepository.setPayment(payment, uncertainPayment.getId(), clearRegistryStatus);
+                    }
+                }
+
+                PaymentSessionStatus paymentSessionStatus = PaymentSessionStatus.LOADED;
+                paymentSession.setStatus(paymentSessionStatus);
+                updateResultMessage(uncertainPaymentMap, paymentMap, parsedInfoList, paymentSession.getStatus());
+
+                // generate report
+                Optional<ReportItem> report = paymentSessionReportService.getBankStatementDirectReport(itemList);
+                if (report.isPresent()) {
+                    // write report to file
+                    Path reportPath = FileUtils.createPathSafety(paymentReportPath, ExtSystemCode.DIRECT.getCode(), generateBankStatementReportFilename(originalFilename));
+                    Files.write(reportPath, report.get().getData(), StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE_NEW);
+                    paymentSession.setReportFileName(reportPath.getFileName().toString());
+                    paymentSessionService.save(paymentSession);
+                }
+                Files.move(file.toPath(), filePath, StandardCopyOption.REPLACE_EXISTING);
+                paymentSession.setTotalCount(itemListMain.size());
+                paymentSession.setTotalSum(paymentsSum);
+                paymentSession.setRecordCount(paymentMap.size());
+                paymentSession.setUncertainCount(uncertainPaymentMap.size());
+
+                if (PaymentSessionStatus.LOADED == paymentSession.getStatus()) {
+                    paymentSession.setStatus(PaymentSessionStatus.CONFIRMED);
+                }
+
+                paymentSessionService.save(paymentSession);
+                return paymentSession;
+
+            } catch (IOException e) {
+                logger.error("Error during bank statement report generation.", e);
+                return paymentSession;
+            } catch (KapAccountException e) {
+                paymentSessionService.deletePaymentSession(paymentSession.getId());
+                paymentSession.setStatus(PaymentSessionStatus.NOT_MATCHED);
+                return paymentSession;
+            } catch (NoSuchElementException e) {
+                paymentSessionService.deletePaymentSession(paymentSession.getId());
+                paymentSession.setStatus(PaymentSessionStatus.NO_DATA);
+                return paymentSession;
+            }
+        } else {
+            return new PaymentSession();
+        }
+    }
+
+    @Override
+    public ExtSystem getExtSystem() {
+        return extSystem;
+    }
+
+
+    /**
+     * Updates result message for given report items for cases:
+     * - payment already exist. There was payment founded by external id and contractor id;
+     * - payment was imported;
+     *
+     * @param paymentSessionStatus status
+     */
+    private void updateResultMessage(Map<Long, UncertainPayment> uncertainPaymentMap, Map<Long, Payment> paymentMap, List<Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>>> parsedInfoList, PaymentSessionStatus paymentSessionStatus) {
+
+        if (PaymentSessionStatus.LOADED == paymentSessionStatus) {
+            for (Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>> pair : parsedInfoList) {
+                for (BankStatementItemParsedInfo info : pair.getSub()) {
+                    BankStatementItem item = info.getBankStatementItem();
+                    UncertainPayment uncertainPayment = uncertainPaymentMap.get(info.getIndex());
+                    Payment payment = paymentMap.get(info.getIndex());
+                    if (uncertainPayment != null) {
+                        item.setResult(info.getFullAddress());
+                        if (payment != null) {
+                            item.setPaymentSum(payment.getAmount());
+                            item.setPenaltySum(payment.getPenaltyAmount());
+                        } else {
+                            item.setPaymentSum(uncertainPayment.getUncertainPaymentTypeId() == 1 ? uncertainPayment.getCredit() : uncertainPayment.getDebit());
+                        }
+                    } else {
+                        item.setResult(Const.Report.REPORT_BANK_STATEMENT_EXTERNAL_ID_DUPLICATE_MESSAGE);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * @param originalFilename bank statement file name
+     * @return banks statement report file name
+     */
+    private String generateBankStatementReportFilename(String originalFilename) {
+        String reportFilename = FilenameUtils.getBaseName(originalFilename) + "." + ReportFormat.XLSX.getExtension();
+        return getCurrentDateFormatted() + "_" + reportFilename;
+    }
+
+    /**
+     * @return formatted current date
+     */
+    private String getCurrentDateFormatted() {
+        return new SimpleDateFormat(Const.Report.REPORT_BANK_STATEMENT_FILENAME_DATE_FORMAT).format(new Date());
+    }
+
+    /**
+     * @return payments that were just created for each given bank statement item.
+     */
+    private Map<Long, Payment> createPayments(List<BankStatementItemParsedInfo> parsedInfo) {
+        if (!parsedInfo.isEmpty()) {
+            Set<Date> dates = parsedInfo.stream().map(BankStatementItemParsedInfo::getRegisterDate).collect(Collectors.toSet());
+            Set<Long> flatIds = parsedInfo.stream().map(BankStatementItemParsedInfo::getFlatIdFromComment).collect(Collectors.toSet());
+            Set<YearMonthItem> yearMonthItems = getYearMonthItems(dates);
+            // this map is needed for checking if the penalties were paid or not
+            Map<FlatYearMonthItem, BillAmountItem> billAmountItems =
+                    billRepository.getBillAmountItemsGroupedByFlatAndYearAndMonth(flatIds, yearMonthItems);
+            Map<Long, Payment> paymentMap = new HashMap<>();
+            for (BankStatementItemParsedInfo info : parsedInfo) {
+                if (info.getUncertainPaymentStatus() != null && info.getUncertainPaymentStatus().getCode().equals("WRONG_ACCOUNT")) { // uncertain payments with status WRONG_ACCOUNT must be processed manually
+                    continue;
+                }
+                BankStatementItem bankStatementItem = info.getBankStatementItem();
+                Long flatId = info.getFlatIdFromComment();
+                String flatAddress = info.getFullAddress();
+                if (flatAddress != null) {
+                    BigDecimal credit = bankStatementItem.getCredit();
+                    BigDecimal penalty = BigDecimal.ZERO;
+                    Date date = bankStatementItem.getDate();
+                    Calendar calendar = Calendar.getInstance();
+                    calendar.setTime(date == null ? new Date() : date);
+                    FlatYearMonthItem flatYearMonthItem = new FlatYearMonthItem(flatId, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH) + 1);
+                    BillAmountItem billAmountItem = billAmountItems.get(flatYearMonthItem);
+                    /* KAP-2162
+                     if direct payment amount is equals to sum of due_amount and penalty_amount from bill for given flat and time period,
+                     then penalty should be included into payment as payment.penalty_amount.
+                     Otherwise the entire direct payment amount should be saved as payment.amount.*/
+                    if ((billAmountItem != null &&
+                            billAmountItem.getDueAmount().add(billAmountItem.getPenaltyAmount())
+                                    .compareTo(bankStatementItem.getCredit()) == 0)) {
+                        credit = billAmountItem.getDueAmount();
+                        penalty = billAmountItem.getPenaltyAmount();
+                    }
+                    Flat flat = new Flat();
+                    flat.setId(flatId);
+                    // flat address is needed to be printed in report
+                    flat.setFullAddress(flatAddress);
+                    Payment payment = new Payment.PaymentBuilder(credit, date, flat)
+                            .comment(bankStatementItem.getComment())
+                            .penaltyAmount(penalty)
+                            .build();
+                    info.setPayment(payment);
+                    paymentMap.put(info.getIndex(), payment);
+                }
+            }
+            return paymentMap;
+        } else {
+            return new HashMap<>();
+        }
+    }
+
+    private Set<YearMonthItem> getYearMonthItems(Set<Date> dates) {
+        Set<YearMonthItem> yearMonthItems = new HashSet<>();
+        for (Date date : dates) {
+            Calendar calendar = Calendar.getInstance();
+            calendar.setTime(date);
+            yearMonthItems.add(new YearMonthItem(calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH) + 1));
+        }
+        return yearMonthItems;
+    }
+
+    /**
+     * Parses register .txt file from Sberbank or VTB.
+     *
+     * @param file bank statement source file
+     * @return pair of {@link DirectPaymentGroup} and List of {@link BankStatementItemParsedInfo} which is grouped by
+     * operation date and account.
+     */
+    private List<Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>>> parseBankStatement(File file) {
+        List<Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>>> result = new ArrayList<>();
+        List<BankStatementItemParsedInfo> allItems = new ArrayList<>();
+        List<BankStatementItem> items = new ArrayList<>();
+        try {
+            String content = new String(Files.readAllBytes(file.toPath()), Charset.forName(Const.IO.CP_1251));
+            content = content.replaceAll("(?<!\r)\n", "");
+            Files.write(file.toPath(), content.getBytes(Charset.forName(Const.IO.CP_1251)));
+            String bankAccount = getTitleBankAccount(content);
+            if (bankAccount == null || bankAccount.isEmpty())
+                throw new KapAccountException("Can not init bankAccount");
+
+            String regex = "(СекцияДокумент(.*?)\n)|(КонецДокумента)";
+            String[] payments = content.split(regex);
+            for (String payment : payments) {
+                BankStatementItem bankStatementItem = new BankStatementItem();
+                String[] paymentFields = payment.split("\r\n");
+                if (paymentFields.length > 20) {
+                    for (String paymentField : paymentFields) {
+                        String[] keyAndValue = paymentField.split("=", 2);
+                        setValue(bankStatementItem, keyAndValue[0], keyAndValue.length > 1 ? keyAndValue[1] : "");
+                    }
+                    if (bankAccount.equals(bankStatementItem.getAccountSender())) { // marker for debit/credit
+                        bankStatementItem.setDate(bankStatementItem.getChargeDate());
+                        String temp = bankStatementItem.getAccount();
+                        bankStatementItem.setAccount(bankStatementItem.getAccountSender());
+                        bankStatementItem.setAccountSender(temp);
+                        bankStatementItem.setDebt(bankStatementItem.getSumm());
+                        bankStatementItem.setVatNumberSender(bankStatementItem.getVatNumberRecipient());
+                        bankStatementItem.setBik(bankStatementItem.getRecipientBik());
+                        bankStatementItem.setNameSender(bankStatementItem.getNameRecipient());
+                        bankStatementItem.setNameBank(bankStatementItem.getNameBankRecipient());
+                    } else {
+                        bankStatementItem.setDate(bankStatementItem.getReceivedDate());
+                        bankStatementItem.setCredit(bankStatementItem.getSumm());
+                        bankStatementItem.setAccountBank(bankStatementItem.getPayerAccountBank());
+                    }
+                    items.add(bankStatementItem);
+                }
+            }
+            items.sort(Comparator.comparing(BankStatementItem::getDate, Comparator.nullsLast(Comparator.naturalOrder())).thenComparing(BankStatementItem::getAccount, Comparator.nullsLast(Comparator.naturalOrder())));
+
+            long index = 0;
+            Date tempDate = items.get(0).getDate();
+            String tempAccount = items.get(0).getAccount();
+            // finding account in comment and grouping by operation date and account
+            for (BankStatementItem bankStatementItem : items) {
+                BankStatementItemParsedInfo parsedInfo = new BankStatementItemParsedInfo();
+                parsedInfo.setBankStatementItem(bankStatementItem);
+
+                if (bankStatementItem.getCredit() != null) {
+                    Matcher accountMatcher = accountPattern.matcher(bankStatementItem.getComment());
+                    Set<String> setAccount = new HashSet<>();
+                    while (accountMatcher.find()) {
+                        setAccount.add(accountMatcher.group(0));
+                    }
+                    if (setAccount.size() == 1) {
+                        String account = null;
+                        for (String iterator : setAccount) {
+                            account = iterator;
+                        }
+                        parsedInfo.setAccountFromComment(account);
+                        parsedInfo.setRegisterDate(bankStatementItem.getDate());
+                    }
+                }
+
+                if (bankStatementItem.getDebt() != null) {
+                    Matcher contractMatcher = contractPattern.matcher(bankStatementItem.getComment());
+                    Set<String> setContract = new HashSet<>();
+                    while (contractMatcher.find()) {
+                        setContract.add(contractMatcher.group(0));
+                    }
+                    if (setContract.size() == 1) {
+                        String contractNumber = null;
+                        for (String iterator : setContract) {
+                            contractNumber = iterator;
+                        }
+                        parsedInfo.setContractNumberFromComment(contractNumber);
+                    }
+                }
+
+                parsedInfo.setIndex(index++);
+                if (!parsedInfo.getBankStatementItem().getDate().equals(tempDate) || !parsedInfo.getBankStatementItem().getAccount().equals(tempAccount)) {
+                    result.add(new Pair<>(new DirectPaymentGroup(tempDate, tempAccount), allItems));
+                    tempDate = parsedInfo.getBankStatementItem().getDate();
+                    tempAccount = parsedInfo.getBankStatementItem().getAccount();
+                    allItems = new ArrayList<>();
+                }
+                allItems.add(parsedInfo);
+            }
+            if (!allItems.isEmpty()) {
+                result.add(new Pair<>(new DirectPaymentGroup(tempDate, tempAccount), allItems));
+            }
+        } catch (Exception e) {
+            logger.error(String.format("Error during parsing the file '%s'", file.getName()), e);
+            return new ArrayList<>();
+        }
+
+        convertAccountsToFlatIdsAndContractNumbersToPaymentOrders(result);
+        return result;
+    }
+
+    private String getTitleBankAccount(String content) {
+        String bankAccount = null;
+        String title = null;
+        try {
+            title = content.substring(content.indexOf("СекцияРасчСчет"), content.indexOf("КонецРасчСчет"));
+        } catch (Exception ignored) {}
+
+        if (title == null || title.length() == 0)
+            return null;
+
+        String[] titleFields = title.split("\r\n");
+        for (String titleField : titleFields) {
+            String[] keyAndValue = titleField.split("=", 2);
+            if (keyAndValue.length > 0 && keyAndValue[0].equals("РасчСчет") && !keyAndValue[1].isEmpty())
+                bankAccount = keyAndValue[1];
+        }
+
+        return bankAccount;
+    }
+
+    /**
+     * Fills the object by matching the key from the registry with the key from the annotation {@link RegisterField}.
+     *
+     * @param item  fillable object
+     * @param key   {@link RegisterField} name
+     * @param value string value from register
+     */
+    private void setValue(BankStatementItem item, String key, String value) {
+        try {
+            Field[] fields = BankStatementItem.class.getDeclaredFields();
+            for (Field field : fields) {
+                if (field.isAnnotationPresent(RegisterField.class)) {
+                    RegisterField registerField = field.getAnnotation(RegisterField.class);
+                    if (!registerField.preferredName().equals("") && key.equals(registerField.preferredName())) {
+                        Object parsedObject = parseValue(field, value, item, true);
+                        if (parsedObject != null) {
+                            BeanUtils.setProperty(item, field.getName(), parsedObject);
+                        }
+                        return;
+                    } else {
+                        for (String fieldName : registerField.name()) {
+                            if (key.contains(fieldName) && (key.length() - fieldName.length() == 1 // for keys that differ only by one digit at the end
+                                    || key.length() == fieldName.length())) {
+                                Object parsedObject = parseValue(field, value, item, false);
+                                if (parsedObject != null) {
+                                    BeanUtils.setProperty(item, field.getName(), parsedObject);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (InvocationTargetException | IllegalAccessException e) {
+            logger.error("Value '{}' has wrong format", value);
+        }
+    }
+
+    /**
+     * Parses string value to {@link Date}, {@link BigDecimal} or {@link String} and sets it to object "item".
+     *
+     * @param field       fillable field
+     * @param value       string value from register
+     * @param item        fillable object
+     * @param isPreferred if true then it uses {@link RegisterField#preferredName()}. In other way it uses {@link RegisterField#name()}
+     *                    that concat if value already exists
+     * @return object with filled field
+     */
+    private Object parseValue(Field field, String value, BankStatementItem item, boolean isPreferred) {
+        SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy");
+        Class<?> type = field.getType();
+        if (type == Date.class) {
+            try {
+                return StringUtils.isNotEmpty(value) ? dateFormat.parse(value) : null;
+            } catch (ParseException e) {
+                logger.error("Date '{}' has wrong format", value);
+            }
+        }
+        if (type == BigDecimal.class) {
+            return StringUtils.isNotEmpty(value) ? new BigDecimal(value.replace(",", ".")) : null;
+        }
+        if (isPreferred) {
+            return value;
+        } else {
+            String t = "";
+            try {
+                Object o = field.get(item);
+                t = o != null ? o.toString() + " " : "";
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+            return t + value;
+        }
+    }
+
+    /**
+     * Forms map with new {@link UncertainPayment} and checking that all payment from DB with the same account
+     * and operation date present in register. For example
+     * 1) there are 10 rows in register and 10 rows in DB with the same account and operation date.
+     * If they match by 6 fields (account, debit, credit, docDate, nDoc, korAccount)
+     * then it's correct, else if at least one row doesn't match by 6 fields then it's incorrect and the register will not load;
+     * 2) there are 10 rows in register and 11 rows in DB with the same account and operation date. It's incorrect,
+     * the register will not load;
+     * 3) there are 10 rows in register and 9 rows in DB with the same account and operation date. All 9 rows rows from register
+     * match by 6 fields with 9 rows DB and there are 1 new row in register. It is correct, 1 row will be added and register will upload.
+     * Uncertain payments with wrong account are not added to the table "payment". "Wrong account" means that the account from the register
+     * doesn't match with account from the database.
+     *
+     * @param parsed         grouped info from register
+     * @param paymentSession new payment session for the new register
+     * @param registerName   uploaded filename
+     * @return map with filled {@link UncertainPayment} with only new payments. Sends success email message with description file.
+     * @throws KapAccountException    if there are conflict between payments from register and payments from DB.
+     *                                Sends error email message with description file
+     * @throws NoSuchElementException if there aren't new payments
+     */
+    private Map<Long, UncertainPayment> createUncertainPayment(List<Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>>> parsed, PaymentSession paymentSession, String registerName) throws KapAccountException, NoSuchElementException {
+        UncertainPaymentStatus unclearStatus = uncertainPaymentStatusRepository.findByCode("UNCLEAR");
+        UncertainPaymentStatus clearStatus = uncertainPaymentStatusRepository.findByCode("CLEAR");
+        UncertainPaymentStatus wrongAccountStatus = uncertainPaymentStatusRepository.findByCode("WRONG_ACCOUNT");
+        List<DecisionSpecAccountLink> specAccountLinks = decisionRepository.getSpecAccountsForExtHouses(fondInfoRepository.findFirstByOrderById());
+        Map<Long, DecisionSpecAccountLink> map = specAccountLinks.stream().collect(Collectors.toMap(DecisionSpecAccountLink::getHouseId, item -> item));
+        Map<Long, UncertainPayment> uncertainPaymentMap = new HashMap<>();
+        List<DirectPaymentRegisterErrorInfo> errorRows = new ArrayList<>();
+        for (Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>> pair : parsed) {
+            List<UncertainPaymentUniqueDto> paymentsByDocDate = uncertainPaymentRepository.getPaymentsByDocDate(pair.getMain().getDate(), pair.getMain().getAccount());
+            int paymentsFromDbSize = paymentsByDocDate.size();
+            for (BankStatementItemParsedInfo info : pair.getSub()) {
+                BankStatementItem item = info.getBankStatementItem();
+                BigDecimal credit = item.getCredit() != null ? item.getCredit().setScale(2) : BigDecimal.ZERO;
+                BigDecimal debit = item.getDebt() != null ? item.getDebt().setScale(2) : BigDecimal.ZERO;
+                List<UncertainPaymentUniqueDto> tempList = paymentsByDocDate.stream().filter(el ->
+                        el.getAccount().equals(item.getAccount()) &&
+                                el.getDebit().compareTo(debit) == 0 &&
+                                el.getCredit().compareTo(credit) == 0 &&
+                                el.getOperationDate().compareTo(item.getDate()) == 0 &&
+                                el.getNDoc().equals(item.getDocumentNumber()) &&
+                                el.getKorAccount().equals(item.getAccountSender())).collect(Collectors.toList());
+                if (!tempList.isEmpty()) {
+                    paymentsFromDbSize--;
+                } else {
+                    UncertainPayment uncertainPayment = new UncertainPayment();
+                    uncertainPayment.setAccount(item.getAccount());
+                    uncertainPayment.setOperationDate(item.getDate());
+
+                    if (info.getAuctionContractPaymentOrder() != null)
+                        uncertainPayment.setAuctionContract(info.getAuctionContractPaymentOrder().getAuctionContract());
+                    uncertainPayment.setUncertainPaymentStatus(uncertainPayment.getAuctionContract() != null ? clearStatus : unclearStatus);
+
+                    //#9488 set UncertainPaymentStatus = "WRONG_ACCOUNT" if flat account != uncertain account
+                    if (info.getFlatIdFromComment() != null) {
+                        List<Long> extHouseIds = extHouseREGRepository.getExtHouseIdByFlatId(info.getFlatIdFromComment());
+                        if (extHouseIds.size() > 1 && !checkIfAllAccountsAreTheSame(map, extHouseIds)) {
+                            uncertainPayment.setUncertainPaymentStatus(wrongAccountStatus);
+                        } else if (!extHouseIds.isEmpty()) {
+                            Long houseId = extHouseIds.get(0);
+                            DecisionSpecAccountLink link = map.get(houseId);
+                            if (!link.getAccount().equals(item.getAccount())) {
+                                uncertainPayment.setUncertainPaymentStatus(wrongAccountStatus);
+                            }
+                        }
+                    }
+
+                    uncertainPayment.setCredit(credit);
+                    uncertainPayment.setDebit(debit);
+                    uncertainPayment.setUncertainPaymentTypeId(uncertainPayment.getCredit().compareTo(BigDecimal.ZERO) > 0 ? 1L : 2L);
+                    uncertainPayment.setCode(item.getCode());
+                    uncertainPayment.setComment(item.getComment());
+                    uncertainPayment.setBik(item.getBik());
+                    uncertainPayment.setNDoc(item.getDocumentNumber());
+                    uncertainPayment.setDocDate(item.getDocumentDate());
+                    uncertainPayment.setDocId(item.getDocumentId());
+                    uncertainPayment.setOperationCode(item.getOperationCode());
+                    uncertainPayment.setKorName(item.getNameSender());
+                    uncertainPayment.setKorAccount(item.getAccountSender());
+                    uncertainPayment.setBankName(item.getNameBank());
+                    uncertainPayment.setKorBankAccount(item.getAccountBank());
+                    uncertainPayment.setKorInn(item.getVatNumberSender());
+                    uncertainPayment.setPaymentSession(paymentSession);
+                    uncertainPayment.setPaymentOrder(item.getPaymentOrder() != null ? Integer.parseInt(item.getPaymentOrder()) : null);
+                    info.setUncertainPayment(uncertainPayment);
+                    info.setUncertainPaymentStatus(uncertainPayment.getUncertainPaymentStatus());
+                    uncertainPaymentMap.put(info.getIndex(), uncertainPayment);
+                }
+            }
+            if (paymentsFromDbSize > 0) {
+                errorRows.add(new DirectPaymentRegisterErrorInfo(pair.getMain().getDate(), pair.getMain().getAccount(), paymentsByDocDate.size(), pair.getSub().size(), paymentsFromDbSize));
+            }
+        }
+        if (!errorRows.isEmpty()) {
+            User notifiedUser = userService.findUserByLogin(paymentSession.getAddUser());
+            sendErrorMessage(errorRows, registerName, notifiedUser);
+            logger.error("Incorrect payments in register");
+            throw new KapAccountException();
+        }
+        if (uncertainPaymentMap.isEmpty()) {
+            throw new NoSuchElementException();
+        }
+        return uncertainPaymentMap;
+    }
+
+    /**
+     * Calls when on one mst_house there are several ext_house-reg
+     *
+     * @param map HashMap with extHouseId as the key and specAccount as the value
+     * @param extHouseIds ArrayList with extHouseIds retrieved by flatId
+     * @return true if all elements are the same
+     */
+    private boolean checkIfAllAccountsAreTheSame(Map<Long, DecisionSpecAccountLink> map, List<Long> extHouseIds) {
+        DecisionSpecAccountLink first = map.get(extHouseIds.get(0));
+        for (int i = 1; i < extHouseIds.size(); i++) {
+            if (!map.get(extHouseIds.get(i)).getAccount().equals(first.getAccount())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Sends error email message with file attachment.
+     *
+     * @param errorRows    list with counted errors by operation date and account
+     * @param registerName uploaded filename
+     */
+    public void sendErrorMessage(List<DirectPaymentRegisterErrorInfo> errorRows, String registerName, User notifiedUser) {
+        File file = formErrorDescriptionFile(errorRows);
+        List<User> notifiedUserList = new ArrayList<>();
+        notifiedUserList.add(notifiedUser);
+
+        if (file != null) {
+            try {
+                messagingService.sendMail("Реестр платежей '" + registerName + "' не загружен.",
+                        "Отчёт о загрузке находится во вложении к данному письму.", file, notifiedUserList);
+            } catch (Exception e) {
+                logger.error("Error during sending error description message", e);
+            } finally {
+                org.apache.commons.io.FileUtils.deleteQuietly(file);
+            }
+        }
+    }
+
+    /**
+     * Forms a file with a table inside, which is filled with information from errorRows.
+     *
+     * @param errorRows list with counted errors by operation date and account
+     * @return .txt file with table inside
+     */
+    private File formErrorDescriptionFile(List<DirectPaymentRegisterErrorInfo> errorRows) {
+        File file = new File(tempDirectory + Const.System.SLASH + "Отчёт о загрузке.txt");
+        SimpleDateFormat dateFormat = new SimpleDateFormat("dd.MM.yyyy");
+        String leftAlignFormat = "| %-14s | %-20s | %-15d | %-15d | %-15d |%n";
+
+        try (FileWriter fileWriter = new FileWriter(file); BufferedWriter writer = new BufferedWriter(fileWriter)) {
+            String rowSeparator = "+----------------+----------------------+-----------------+-----------------+-----------------+\r\n";
+            writer.write(rowSeparator);
+            writer.write("| Дата           | Р/с                  | В базе данных   | Всего в реестре | Не хватает      |\r\n");
+            writer.write(rowSeparator);
+
+            for (DirectPaymentRegisterErrorInfo errorRow : errorRows) {
+                writer.write(String.format(leftAlignFormat, dateFormat.format(errorRow.getDate()), errorRow.getAccount(), errorRow.getRowsInDb(), errorRow.getRowsInRegister(), errorRow.getMismatchedRows()));
+            }
+            writer.write(rowSeparator);
+        } catch (IOException e) {
+            logger.error("Error during forming error description file", e);
+            return null;
+        }
+        return file;
+    }
+
+    private void convertAccountsToFlatIdsAndContractNumbersToPaymentOrders(List<Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>>> result) {
+        Set<String> accounts = result.stream()
+                .map(Pair::getSub)
+                .flatMap(Collection::stream)
+                .map(BankStatementItemParsedInfo::getAccountFromComment)
+                .collect(Collectors.toSet());
+        List<String> contractNumbers = result.stream()
+                .map(Pair::getSub)
+                .flatMap(Collection::stream)
+                .filter(itemParsedInfo -> itemParsedInfo.getContractNumberFromComment() != null && !itemParsedInfo.getContractNumberFromComment().isEmpty())
+                .map(itemParsedInfo -> itemParsedInfo.getContractNumberFromComment().toLowerCase())
+                .distinct()
+                .collect(Collectors.toList());
+        Map<String, Long> flatIdsByAccounts = flatRepository.getFlatIdsByAccounts(accounts);
+        Map<Long, String> flatAddressesByIds = flatRepository.getFullAddressesByIds(new HashSet<>(flatIdsByAccounts.values()));
+
+        Map<Pair<String, BigDecimal>, AuctionContractPaymentOrder> paymentOrderByContractNumber = new HashMap<>();
+        if (!contractNumbers.isEmpty())
+            paymentOrderByContractNumber = auctionContractPaymentOrderRepository.getOrderByContractNumbers(contractNumbers);
+
+        for (Pair<DirectPaymentGroup, List<BankStatementItemParsedInfo>> pair : result) {
+            for (BankStatementItemParsedInfo info : pair.getSub()) {
+                String account = info.getAccountFromComment();
+                Long flatId = flatIdsByAccounts.get(account);
+                if (flatId != null) {
+                    info.setFlatIdFromComment(flatId);
+                    info.setFullAddress(flatAddressesByIds.get(flatId));
+                }
+                String contractNumber = info.getContractNumberFromComment();
+                BigDecimal amount = info.getBankStatementItem().getDebt();
+                if (org.apache.commons.lang.StringUtils.isNotEmpty(contractNumber))
+                    info.setAuctionContractPaymentOrder(paymentOrderByContractNumber.get(new Pair<>(contractNumber.toUpperCase(), amount)));
+            }
+        }
+    }
+
+    private void setUncertainPaymentToPaymentOrder(BankStatementItemParsedInfo bankStatementItemParsedInfo) {
+        uncertainPaymentDebitService.setUncertainPaymentToPaymentOrder(
+                bankStatementItemParsedInfo.getUncertainPayment(),
+                bankStatementItemParsedInfo.getAuctionContractPaymentOrder());
+    }
+
+}
